@@ -1,0 +1,178 @@
+/* styles.css */
+
+/* Base Styles */
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #f5f7fa;
+    color: #333;
+    margin: 0;
+    padding: 0;
+}
+
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 20px;
+}
+
+h1 {
+    text-align: center;
+    font-weight: 600;
+    margin-bottom: 40px;
+}
+
+/* Main Content Layout */
+.main-content {
+    display: flex;
+    flex-direction: row;
+}
+
+/* Author List Styles */
+.authors-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    justify-content: center;
+    flex: 1;
+}
+
+.author-card {
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    width: 280px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.author-photo img {
+    width: 100%;
+    height: 200px;
+    object-fit: cover;
+}
+
+.author-info {
+    padding: 20px;
+    text-align: center;
+}
+
+.author-info h3 {
+    margin-top: 0;
+    font-size: 1.2em;
+    font-weight: 600;
+}
+
+.author-info p {
+    font-size: 0.95em;
+    color: #555;
+}
+
+.view-context-btn {
+    margin-top: 15px;
+    padding: 10px 20px;
+    background-color: #1d72b8;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.view-context-btn:hover {
+    background-color: #1665a2;
+}
+
+/* Side Panel Styles */
+.side-panel {
+    width: 400px;
+    background-color: #fff;
+    border-left: 1px solid #ddd;
+    box-shadow: -2px 0 4px rgba(0, 0, 0, 0.1);
+    overflow-y: auto;
+    position: relative;
+}
+
+.side-panel.hidden {
+    display: none;
+}
+
+.side-panel-header {
+    position: sticky;
+    top: 0;
+    background-color: #fff;
+    padding: 15px 20px;
+    border-bottom: 1px solid #ddd;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.side-panel-header h2 {
+    margin: 0;
+    font-size: 1.2em;
+    font-weight: 600;
+}
+
+.side-panel-close {
+    font-size: 1.5em;
+    color: #aaa;
+    cursor: pointer;
+}
+
+.side-panel-close:hover {
+    color: #000;
+}
+
+.side-panel-body {
+    padding: 20px;
+}
+
+.side-panel-section {
+    margin-bottom: 30px;
+}
+
+.side-panel-section h3 {
+    font-size: 1.1em;
+    margin-bottom: 10px;
+    border-bottom: 2px solid #1d72b8;
+    padding-bottom: 5px;
+}
+
+.side-panel-section p {
+    font-size: 1em;
+    color: #333;
+    line-height: 1.5;
+}
+
+/* Error Message Styles */
+.error-message {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: #f44336; /* Red background */
+    color: white;
+    padding: 15px 20px;
+    border-radius: 4px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    z-index: 1001;
+    font-size: 1em;
+}
+
+.error-message.hidden {
+    display: none;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .main-content {
+        flex-direction: column;
+    }
+
+    .side-panel {
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid #ddd;
+    }
+}

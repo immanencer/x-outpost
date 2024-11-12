@@ -16,6 +16,58 @@
                 "${workspaceFolder}/**/*.js"
             ],
             "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "🗞️ llm context generator",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "program": "${workspaceFolder}\\llm_response_context.mjs",
+            "outFiles": [
+                "${workspaceFolder}/**/*.js"
+            ],
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "🕸️ web server",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "program": "${workspaceFolder}\\server.mjs",
+            "outFiles": [
+                "${workspaceFolder}/**/*.js"
+            ],
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "🥵 spicy tweets",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "program": "${workspaceFolder}\\generate_responses.mjs",
+            "outFiles": [
+                "${workspaceFolder}/**/*.js"
+            ],
+            "envFile": "${workspaceFolder}/.env"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "✖️ responder",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "program": "${workspaceFolder}\\xresponder.mjs",
+            "outFiles": [
+                "${workspaceFolder}/**/*.js"
+            ],
+            "envFile": "${workspaceFolder}/.env"
         }
     ]
 }

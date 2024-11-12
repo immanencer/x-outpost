@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Author Summarization Dashboard</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <!-- Custom Stylesheet -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Author Summarization Dashboard</h1>
+        <div class="main-content">
+            <div id="authors" class="authors-list"></div>
+            <div id="side-panel" class="side-panel hidden">
+                <div class="side-panel-header">
+                    <h2 id="side-panel-title">Context & Response</h2>
+                    <span id="side-panel-close" class="side-panel-close">&times;</span>
+                </div>
+                <div class="side-panel-body">
+                    <!-- Content will be injected via JavaScript -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Error Message Container -->
+    <div id="error-message" class="error-message hidden">
+        <!-- Error messages will be displayed here -->
+    </div>
+
+    <script>
+        async function fetchAuthors() {
+            try {
+                const response = await fetch('/api/authors');
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        displayError('Authors not found.');
+                    } else {
+                        displayError('An error occurred while fetching authors.');
+                    }
+                    return;
+                }
+                const authors = await response.json();
+                const authorsContainer = document.getElementById('authors');
+
+                authorsContainer.innerHTML = '';
+
+                authors.forEach(author => {
+                    const authorCard = document.createElement('div');
+                    authorCard.className = 'author-card';
+                    authorCard.innerHTML = `
+                        <div class="author-photo">
+                            <img src="/public/images/${author.id}.jpg" alt="${author.name}" onerror="this.onerror=null;this.src='/public/images/default.jpg';">
+                        </div>
+                        <div class="author-info">
+                            <h3>${author.name} (@${author.username})</h3>
+                            <p>${author.evolving_notes ? author.evolving_notes : 'No notes available.'}</p>
+                            <button class="view-context-btn" data-author-id="${author.id}">View Context & Response</button>
+                        </div>
+                    `;
+                    authorsContainer.appendChild(authorCard);
+                });
+
+                // Attach event listeners to buttons
+                document.querySelectorAll('.view-context-btn').forEach(button => {
+                    button.addEventListener('click', () => {
+                        const authorId = button.getAttribute('data-author-id');
+                        fetchContextAndResponse(authorId);
+                    });
+                });
+            } catch (error) {
+                console.error('Error fetching authors:', error);
+                displayError('An unexpected error occurred while fetching authors.');
+            }
+        }
+
+        async function fetchContextAndResponse(authorId) {
+            try {
+                const response = await fetch(`/api/authors/${authorId}/context`);
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        displayError(`Author with ID ${authorId} not found.`);
+                    } else {
+                        displayError('An error occurred while fetching author context.');
+                    }
+                    return;
+                }
+                const data = await response.json();
+                displaySidePanel(data);
+            } catch (error) {
+                console.error('Error fetching context and response:', error);
+                displayError('An unexpected error occurred while fetching author context.');
+            }
+        }
+
+        function displaySidePanel(data) {
+            const sidePanel = document.getElementById('side-panel');
+            const sidePanelBody = sidePanel.querySelector('.side-panel-body');
+            const sidePanelTitle = document.getElementById('side-panel-title');
+
+            // Set the title to the author's name
+            sidePanelTitle.textContent = `Context & Response for ${data.author.name}`;
+
+            const tweetsHtml = data.tweets && data.tweets.length > 0
+                ? data.tweets.map(tweet => `<p>${tweet.text}</p>`).join('')
+                : '<p>No tweets available.</p>';
+
+            const responseHtml = data.response
+                ? `<p>${data.response}</p>`
+                : '<p>No proposed response available.</p>';
+
+            sidePanelBody.innerHTML = `
+                <div class="side-panel-section">
+                    <h3>Recent Tweets</h3>
+                    ${tweetsHtml}
+                </div>
+                <div class="side-panel-section">
+                    <h3>Proposed Response</h3>
+                    ${responseHtml}
+                </div>
+            `;
+
+            sidePanel.classList.remove('hidden');
+
+            // Close side panel on click
+            document.getElementById('side-panel-close').addEventListener('click', () => {
+                sidePanel.classList.add('hidden');
+            });
+        }
+
+        function displayError(message) {
+            const errorMessage = document.getElementById('error-message');
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+
+            // Automatically hide the error message after 5 seconds
+            setTimeout(() => {
+                errorMessage.classList.add('hidden');
+            }, 5000);
+        }
+
+        document.addEventListener('DOMContentLoaded', fetchAuthors);
+    </script>
+</body>
+</html>
