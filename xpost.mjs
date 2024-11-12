@@ -138,6 +138,13 @@ export async function postX(params, accountId = '', imageBuffer = null) {
                 attempt++;
                 console.error(`🌳 Error posting tweet (Attempt ${attempt}/${maxRetries}):`, error);
 
+                if (error.rateLimit) {
+                    const waitTime = error.rateLimit.reset * 1000 - Date.now();
+                    const delayMinutes = Math.floor(waitTime / 1000 / 60);
+                    console.log(`🌳 Retrying in ${delayMinutes} minutes...`)
+                    await delay(waitTime);
+                } 
+
                 if (attempt < maxRetries) {
                     console.log(`🌳 Retrying in ${attempt * 2} seconds...`);
                     await delay(attempt * 2000); // Exponential backoff

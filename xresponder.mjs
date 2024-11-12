@@ -57,7 +57,7 @@ async function postGeneratedResponses() {
       }
 
       // Wait for 30 minutes before posting the next response
-      const wait_time = ((Math.random() * 5) * 60 * 100) + (1 * 60 * 100); // 30 minutes
+      const wait_time = ((Math.random() * 5) * 60 * 100) + (1 * 42 * 1000); // 30 minutes
       console.log(`Waiting for ${Math.floor(wait_time / 1000 )} seconds before posting the next response...`);
       await delay(wait_time);
       console.log('Done');
