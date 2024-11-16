@@ -250,21 +250,16 @@ async function main() {
       try {
         const timeline = await getHomeTimeline(lastId);
 
-        if (!timeline.data?.data) {
-          console.error('No data found in the response. Exiting.');
-          break;
-        }
-
         for (const tweet of timeline.data.data) {
           await addTweetToMongoDB(db, tweet, timeline.includes);
-          lastId = tweet.id;
+          lastId = lastId > tweet?.id ? lastId : tweet?.id;
         }
 
         if (!timeline.meta.next_token) break;
       } catch (error) {
         console.error('Error fetching home timeline:', error);
       }
-    }
+    
 
     console.log('Fetching recent tweets for all known authors.');
     await fetchRecentTweetsForAuthors(db);
@@ -274,6 +269,8 @@ async function main() {
 
     console.log('Done fetching tweets.');
 
+    await delay(FETCH_INTERVAL);
+  }
   } catch (error) {
     console.error('Error initializing the scraper:', error);
     process.exit(1);

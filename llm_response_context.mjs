@@ -11,10 +11,10 @@ import { describeImage } from './vision.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const client = new MongoClient(process.env.MONGODB_URI);
 
 // Function to connect to MongoDB
 async function connectToMongoDB() {
-  const client = new MongoClient(process.env.MONGODB_URI);
   await client.connect();
   console.log('Connected to MongoDB');
   return client.db(process.env.DB_NAME);
@@ -82,7 +82,7 @@ async function getTweetResponseContext(tweetId, db, author) {
   }));
 
   // Fetch a few of our own tweets to use as context
-  const ourTweets = await tweetsCollection.find({ author_id: author.id }).sort({ created_at: -1 }).limit(5).toArray();
+  const ourTweets = await tweetsCollection.find({ author_id: process.env.TWITTER_USER_ID }).sort({ created_at: -1 }).limit(5).toArray();
   const authorPrompt = await authorsCollection.findOne({ id: author.id }).then(a => a.prompt);
 
   let visionResponse = '';
@@ -278,7 +278,7 @@ async function main () {
       // upsert the response
       await responsesCollection.updateOne({ tweet_id: xpost.id }, { $set: response }, { upsert: true });
     }
-
+    client.close();
   } catch (error) {
     console.error('Error generating response context:', error);
     process.exit(1);
