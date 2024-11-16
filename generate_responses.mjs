@@ -22,7 +22,7 @@ const openai = new OpenAI({
 async function connectToMongoDB() {
   const client = new MongoClient(process.env.MONGODB_URI);
   await client.connect();
-  console.log('Connected to MongoDB');
+  //console.log('Connected to MongoDB');
   return client.db(process.env.DB_NAME);
 }
 
@@ -73,8 +73,17 @@ async function generateTweetResponse(prompt, systemPrompt, journalEntry) {
       ${journalEntry.entry}
     ` });
   }
-  messages.push({ role: 'user', content: `Today's Date is ${(new Date()).toDateString()}:\n\n${prompt}\n\nThis is twitter so all responses MUST be less than 280 characters. Respond with ONLY a short and humorous tweet.` });
+  messages.push(
+    { role: 'user', content: `Today's Date is ${(new Date()).toDateString()}:
+    \n\n${prompt}\n\n
+    This is twitter so all responses MUST be less than 280 characters.
+    Respond with ONLY a short and humorous tweet.
+    Don't include any hashtags or urls.
+    ` });
 
+  console.log('Generating tweet response...');
+  //console.log(prompt);
+  
   try {
     const completion = await openai.chat.completions.create({
       model: TEXT_MODEL,
@@ -92,100 +101,15 @@ async function generateTweetResponse(prompt, systemPrompt, journalEntry) {
 }
 
 // Main execution function
-(async () => {
+async function main () {
   try {
     const db = await connectToMongoDB();
-    const tweetsCollection = db.collection('tweets');
     const responsesCollection = db.collection('responses');
-
     const authorsCollection = db.collection('authors');
 
-    const bobthesnek = await authorsCollection.findOne({ username: 'bobthesnek' });
-    if (!bobthesnek) {
-      console.log('Author @bobthesnek not found.');
-      return;
-    }
 
-    const bobId = bobthesnek.id;
-
-    // Find all tweets that reference tweets by @bobthesnek
-    // MongoDB aggregation pipeline to find tweet references
-    const pipeline = [
-      // First lookup to get author info
-      {
-        $lookup: {
-          from: "authors",
-          localField: "author_id",
-          foreignField: "id",
-          as: "author"
-        }
-      },
-      // Unwind author array from lookup
-      { $unwind: "$author" },
-
-      // Lookup referenced tweets
-      {
-        $lookup: {
-          from: "tweets",
-          localField: "referenced_tweets.id",
-          foreignField: "id",
-          as: "referenced_tweet"
-        }
-      },
-      { $unwind: "$referenced_tweet" },
-
-      // Get author of referenced tweet
-      {
-        $lookup: {
-          from: "authors",
-          localField: "referenced_tweet.author_id",
-          foreignField: "id",
-          as: "referenced_author"
-        }
-      },
-      { $unwind: "$referenced_author" },
-
-      // Match tweets referencing bobthesnek
-      {
-        $match: {
-          "referenced_author.username": "bobthesnek"
-        }
-      },
-
-      // Project needed fields
-      {
-        $project: {
-          _id: 0,
-          tweet_id: "$id",
-          tweet_text: "$text",
-          author: "$author.username",
-          referenced_tweet_id: "$referenced_tweet.id",
-          referenced_tweet_text: "$referenced_tweet.text"
-        }
-      }
-    ];
-
-    // Usage:
-    const replies = (await db.collection('tweets')
-      .aggregate(pipeline).toArray())
-
-    const shelly = await tweetsCollection
-      .find({
-        text: { $regex: '🐢<67>' }
-      }).toArray();
-
-    // find tweets that mention @bobthesnek
-    const mentions = await tweetsCollection
-      .find({
-        text: /@bobthesnek/i,
-        author: { $ne: 'bobthesnek' },
-        author_id: { $ne: bobId }
-      }).toArray();
-    // find responses to any of those tweets
-    const tweets = [...replies, ...mentions, ...shelly]
-      .filter(t => t.author_id !== bobId && t.author !== 'bobthesnek');
+    const bobId = await authorsCollection.findOne({ username: 'bobthesnek' }).then(a => a.id);
     const prompts = await responsesCollection.find({
-      tweet_id: { $in: tweets.map(t => t.id) },
       author_id: { $ne: bobId },
       response: { $exists: false }
     }).toArray();
@@ -244,4 +168,15 @@ async function generateTweetResponse(prompt, systemPrompt, journalEntry) {
     console.error('Error generating tweet responses:', error);
     process.exit(1);
   }
-})();
+}
+
+async function loop() {
+  while (true) {
+    await main();
+    const niceDate = new Date().toLocaleString('en-US');
+    console.log(`${niceDate} Waiting for next iteration...`); 
+    await new Promise(resolve => setTimeout(resolve, 1000 * 60 * 5)); // 5 minutes
+  }
+}
+
+loop().catch(console.error);
