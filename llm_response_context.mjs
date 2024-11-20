@@ -20,6 +20,7 @@ async function connectToMongoDB() {
   return client.db(process.env.DB_NAME);
 }
 
+
 // Function to gather context for responding to a tweet
 async function getTweetResponseContext(tweetId, db, author) {
   const tweetsCollection = db.collection('tweets');
@@ -49,6 +50,18 @@ async function getTweetResponseContext(tweetId, db, author) {
     }
   }
 
+  // Trim the conversation to include only the first two tweets and the most recent three tweets
+  let trimmedConversation = [];
+  if (conversation.length > 5) {
+    trimmedConversation = [
+      ...conversation.slice(0, 2),
+      { type: 'separator', text: `... (${conversation.length - 5} tweets omitted) ...` },
+      ...conversation.slice(-3),
+    ];
+  } else {
+    trimmedConversation = conversation;
+  }
+
   // Fetch recent tweets from the author around the same time
   if (!tweet.created_at) {  
     console.error(`Tweet with ID ${tweetId} does not have a created_at field.`);
@@ -68,11 +81,13 @@ async function getTweetResponseContext(tweetId, db, author) {
   console.log(`Found ${recentTweets.length} recent tweets from author ${author.username}`);
 
   // Prepare a list of relevant tweets
-  const relevantTweets = conversation.map(t => ({
-    author: t.author_id,
-    text: t.text,
-    created_at: t.created_at
-  }));
+  const relevantTweets = trimmedConversation.map(t =>
+    t.type === 'separator' ? t : {
+      author: t.author_id,
+      text: t.text,
+      created_at: t.created_at
+    }
+  );
 
   // Include recent tweets in the context
   const recentTweetsContext = recentTweets.map(t => ({
@@ -87,7 +102,7 @@ async function getTweetResponseContext(tweetId, db, author) {
 
   let visionResponse = '';
   
-  if  (tweet.mediaData) {
+  if (tweet.mediaData) {
     const mediaUrls = tweet.mediaData.filter(m => m.type === 'photo').map(m => m.url || m.preview_image_url);
     
     if (mediaUrls.length > 0) {
@@ -95,22 +110,26 @@ async function getTweetResponseContext(tweetId, db, author) {
       
       // Prepare the vision prompt
       visionResponse = 'The following images were found in the tweet:\n';
-      mediaUrls.forEach(async (url) => {
-        // Check the images collection to see if we've already described this image
-        const described = await db.collection('image_visions').findOne({ url });
-        if (!described) {
-          // If not, describe the image using the vision model
-          const response = await describeImage(url);
-          const description = response.choices[0].message.content;
-          console.log(`Describing image at ${url}: ${description}`);
-          visionResponse += `${description}\n`;
-          // Save the description to the database
-          await db.collection('image_visions').insertOne({ url, description });
-        } else {
-          console.log(`Image at ${url} already described: ${described.description}`);
-          visionResponse += `${described.description}\n`;
+      for (const url of mediaUrls) {
+        try {
+          // Check the images collection to see if we've already described this image
+          const described = await db.collection('image_visions').findOne({ url });
+          if (!described) {
+            // If not, describe the image using the vision model
+            const response = await describeImage(url);
+            const description = response.choices[0].message.content;
+            console.log(`Describing image at ${url}: ${description}`);
+            visionResponse += `${description}\n`;
+            // Save the description to the database
+            await db.collection('image_visions').insertOne({ url, description });
+          } else {
+            console.log(`Image at ${url} already described: ${described.description}`);
+            visionResponse += `${described.description}\n`;
+          }
+        } catch (error) {
+          console.error(`Error processing image at ${url}:`, error);
         }
-      });
+      }
     }
   }
 
@@ -128,7 +147,7 @@ ${recentTweetsContext.map((t, index) => `${index + 1}. ${t.text}`).join('\n')}
 
 Here is the conversation of relevant tweets so far:
 
-${relevantTweets.map((t, index) => `${index + 1}. ${t.author}: ${t.text}`).join('\n')}
+${relevantTweets.map((t, index) => t.type === 'separator' ? t.text : `${index + 1}. ${t.author}: ${t.text}`).join('\n')}
 
 Now, write a tweet responding to this latest message from @${author.username}:
 
@@ -142,7 +161,8 @@ Make sure your response is engaging, funny, and relevant to the conversation.
   return prompt;
 }
 
-async function findLatestTweetMentioningOrReplyingToBob(db, authorId) {
+
+async function findLatestTweetMentioningOrReplyingToBob(db, authorId, allPostAuthors = []) {
   const tweetsCollection = db.collection('tweets');
   const authorsCollection = db.collection('authors');
   const responsesCollection = db.collection('responses');
@@ -169,8 +189,11 @@ async function findLatestTweetMentioningOrReplyingToBob(db, authorId) {
     author_id: authorId, // Tweets by the author
     id: { $nin: respondedTweetIds }, // Exclude tweets already responded to
     $or: [
+      { author_id: { $in: allPostAuthors } }, // Added comma and corrected 'authorId' to 'author_id'
+      { text: { $regex: 'bob', $options: 'i' } }, // Mentions @bobthesnek
       { text: { $regex: '@bobthesnek', $options: 'i' } }, // Mentions @bobthesnek
       { text: { $regex: '🐍', $options: 'i' } }, // Emoji code for snake
+      { text: { $regex: 'snake', $options: 'i' } }, // reply to snake
       { in_reply_to_user_id: bobId } // Replies to Bob
     ]
   };
@@ -182,7 +205,64 @@ async function findLatestTweetMentioningOrReplyingToBob(db, authorId) {
     .limit(1)
     .toArray();
 
+  if (latestTweet.length === 0) {
+    console.log(`No tweets found for author ${authorId} mentioning or replying to Bob.`);
+    return null;
+  }
+
+  if (latestTweet[0].text.startsWith(`RT: @${process.env.TWITTER_USERNAME}`)) {
+    console.log(`Skipping retweet of own tweet ${latestTweet[0].id}`);
+    return null;
+  }
+
   return latestTweet[0];
+}
+
+async function findMissingHandle(authorId, tweet, db) {
+  const authorsCollection = db.collection('authors');
+  let username = null;
+
+  // Check if the tweet is a retweet
+  if (tweet.text.startsWith('RT @')) {
+    const match = tweet.text.match(/^RT @(\w+):/);
+    if (match) {
+      username = match[1];
+    }
+  }
+
+  // If username is still null, check referenced tweets
+  if (!username && tweet.referenced_tweets && tweet.referenced_tweets.length > 0) {
+    for (const ref of tweet.referenced_tweets) {
+      const refTweet = await db.collection('tweets').findOne({ id: ref.id });
+      if (refTweet && refTweet.author_id) {
+        const refAuthor = await authorsCollection.findOne({ id: refTweet.author_id });
+        if (refAuthor && refAuthor.username) {
+          username = refAuthor.username;
+          break;
+        }
+      }
+    }
+  }
+
+  // If username is still null, try to extract from text
+  if (!username) {
+    const match = tweet.text.match(/@(\w+)/);
+    if (match) {
+      username = match[1];
+    }
+  }
+
+  // Update the author in the authors collection
+  if (username) {
+    await authorsCollection.updateOne(
+      { id: authorId },
+      { $set: { username } },
+      { upsert: true }
+    );
+    console.log(`Updated author ${authorId} with username ${username}`);
+  }
+
+  return username;
 }
 
 // Main execution function
@@ -195,48 +275,69 @@ async function main () {
 
     // List the known authors
     const authors = await authorsCollection.find().toArray();
-    console.log('Known authors:', authors.map(a => `${a.username} (${a.id})`).join('\n'));
+    console.log(`${authors.length} authors found.`);
 
-    // Select two authors randomly who haven't been replied to recently
-    const recentAuthors = await responsesCollection.distinct('author_id', { created_at: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } });
-    const nonRecentAuthors = authors.filter(a => !recentAuthors.includes(a.id));
-    const selectedAuthors = nonRecentAuthors.sort(() => 0.5 - Math.random()).slice(0, 2);
+    // Retrieve tweets to prioritize
+    const tweetsCollection = db.collection('tweets');
+    const ourMentions = await tweetsCollection.find({ text: { $regex: `@${process.env.TWITTER_USERNAME}`, $options: 'i' }, author_id: { $ne: process.env.TWITTER_USER_ID }, author_id: { $ne: process.env.TWITTER_USER_ID } }).sort({ created_at: -1 }).toArray();
+    const ourTweetsReplies = await tweetsCollection.find({ in_reply_to_user_id: process.env.TWITTER_USER_ID, author_id: { $ne: process.env.TWITTER_USER_ID } }).sort({ created_at: -1 }).toArray();
 
-    // Hardcoded list of Twitter handles to always reply to
-    const alwaysReplyToHandles = ['immanencer', 'theerebusai', '0xzerebro', 'chrypnotoad'];
-    const alwaysReplyAuthors = authors.filter(a => alwaysReplyToHandles.includes(a.username));
-    // select four random authors
-    const randomAuthors = authors.sort(() => 0.5 - Math.random()).slice(0, 4);
+    // Combine prioritized tweets
+    const prioritizedTweets = [...ourMentions, ...ourTweetsReplies];
 
+    // Set for uniqueness of tweets
+    const tweetSet = new Set();
+    prioritizedTweets.forEach(t => tweetSet.add(t.id));
 
-    const targetAuthors = [...selectedAuthors, ...alwaysReplyAuthors, ...randomAuthors];
-
-
-    for (const author of targetAuthors) {
-      let xpost;
-      if (alwaysReplyAuthors.includes(author) || randomAuthors.includes(author)) {
-        // If this is an always-reply author, find their latest unresponded tweet
-        // get the reponses to this author
-        const responses = await responsesCollection.find({ author_id: author.id }).toArray();
-        // Get the tweet ids of the responses
-        const respondedTweetIds = responses.map(r => r.tweet_id);
-
-        const latestTweet = await db.collection('tweets').findOne(
-          { author_id: author.id },
-          { id: { $nin: respondedTweetIds } },
-          { sort: { created_at: -1 } }
-        );
-        if (!latestTweet) {
-          console.log(`No recent tweets found for author ${author.username}. Skipping.`);
+    for (const tweet of prioritizedTweets) {
+      let author = await authorsCollection.findOne({ id: tweet.author_id });
+      if (!author || !author.username) {
+        const username = await findMissingHandle(tweet.author_id, tweet, db);
+        if (username) {
+          author = { id: tweet.author_id, username };
+        } else {
+          console.error(`Could not find username for author ${tweet.author_id}`);
           continue;
         }
-        console.log(`Found latest tweet for author ${author.username}: ${latestTweet.id}`);
-        xpost = latestTweet;
-      } else {
-        // Otherwise, find the latest xpost for the author
-        xpost = await findLatestTweetMentioningOrReplyingToBob(db, author.id);
       }
 
+      // Skip already processed tweets
+      const existingResponse = await db.collection('responses').findOne({ tweet_id : tweet.id });
+      if (existingResponse) {
+        console.log(`Response context already exists for tweet ${tweet.id}`);
+        continue;
+      }
+
+      const responseContext = await getTweetResponseContext(tweet.id, db, author);
+      if (!responseContext) continue;
+
+      console.log(`Response context for tweet ${tweet.id} by author ${author.username}:`, responseContext);
+
+      // Write the prompt to the database in a responses collection
+      const response = {
+        tweet_id: tweet.id,
+        author_id: author.id,
+        prompt: responseContext
+      };
+
+      // upsert the response
+      await responsesCollection.updateOne({ tweet_id: tweet.id }, { $set: response }, { upsert: true });
+    }
+
+    // Process tweets from known authors
+    const alwaysReplyToHandles = ['immanencer', 'theerebusai', '0xzerebro', 'chrypnotoad', 'iruletheworldmo', 'aihegemonymemes'];
+    const alwaysReplyAuthors = authors.filter(a => alwaysReplyToHandles.includes(a.username.toLowerCase()));
+    const frequentAuthors = await responsesCollection.distinct('author_id', { created_at: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } });
+    const frequentReplyAuthors = authors.filter(a => frequentAuthors.includes(a.id) && !alwaysReplyToHandles.includes(a.username));
+    const newAuthors = authors.filter(a => !frequentAuthors.includes(a.id) && !alwaysReplyToHandles.includes(a.username));
+
+    const targetAuthors = [...alwaysReplyAuthors, ...frequentReplyAuthors, ...newAuthors].slice(0, 6);
+    for (const author of targetAuthors) {
+      let xpost;
+      if (tweetSet.has(author.id)) continue;
+
+      // Get the latest unresponded tweet mentioning or replying to Bob
+      xpost = await findLatestTweetMentioningOrReplyingToBob(db, author.id, alwaysReplyAuthors.map(a => a.id));
       if (!xpost) { 
         console.log(`No xpost found for author ${author.username}`);
         continue;
@@ -278,7 +379,8 @@ async function main () {
       // upsert the response
       await responsesCollection.updateOne({ tweet_id: xpost.id }, { $set: response }, { upsert: true });
     }
-    client.close();
+
+    await client.close();
   } catch (error) {
     console.error('Error generating response context:', error);
     process.exit(1);

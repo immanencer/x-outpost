@@ -86,78 +86,6 @@ async function addTweetToMongoDB(db, tweet, includes) {
   console.log(`Upserted tweet: ${tweet.author_id} tweeted: ${tweet.text}`);
 }
 
-let userByUsernameRateLimit = Date.now();
-// Function to fill out tweets with missing author_id
-async function fillMissingAuthorIds(db) {
-  const tweetsCollection = db.collection('tweets');
-  const authorsCollection = db.collection('authors');
-  const authorsMissingId = await authorsCollection.find({ id: { $exists: false } }).toArray();
-
-  if (Date.now() < userByUsernameRateLimit) {
-    console.log('Rate limit exceeded. Waiting for userByUsername rate limit to reset.');
-    return;
-  }
-
-  try {
-    // Find the author ID for each author
-    for (const author of authorsMissingId) {
-      console.log(`Researching author: ${author.username}`);
-      const response = await xClient.v2.userByUsername(author.username);
-      const authorId = response.data.id;
-      await researchAuthor(db, authorId);
-    }
-  } catch (error) {
-    console.error('Error fetching author:', error);
-    if (error.code === 429) {
-      userByUsernameRateLimit = Date.now() + (error.rateLimit.reset * 1000);
-    }
-  }
-}
-
-
-// Function to research the author and add to MongoDB
-async function researchAuthor(db, authorId) {
-  if (!authorId) {
-    console.error('Invalid author ID:', authorId);
-    return;
-  }
-
-  const authorsCollection = db.collection('authors');
-  let author = await authorsCollection.findOne({ id: authorId });
-  if (author) {
-    console.log(`Author already exists: ${author.username}`);
-  } else {
-    console.log(`Researching author: ${authorId}`);
-    author = (await retryTwitterCall(xClient.v2.user.bind(xClient.v2), authorId)).data;
-  }
-
-  await delay(15000);
-
-  const authorTweets = await retryTwitterCall(xClient.v2.userTimeline.bind(xClient.v2), authorId, {
-    max_results: 10,
-    exclude: 'retweets',
-    expansions: ['attachments.media_keys', 'referenced_tweets.id', 'author_id', 'in_reply_to_user_id', 'entities.mentions.username'],
-    'media.fields': ['url', 'preview_image_url'],
-    'tweet.fields': TWEET_FIELDS,
-  });
-
-  const recentTweetIds = authorTweets.data?.data?.map(tweet => tweet.id) || [];
-  for (const tweet of authorTweets.data?.data || []) {
-    await addTweetToMongoDB(db, tweet, authorTweets.includes);
-  }
-
-  const authorData = {
-    id: author.id,
-    name: author.name,
-    username: author.username,
-    recent_tweets: recentTweetIds,
-    last_fetched_id: recentTweetIds[0] || null,
-  };
-
-  await authorsCollection.updateOne({ id: authorId }, { $set: authorData }, { upsert: true });
-  console.log(`Upserted author: ${author.username}`);
-}
-
 // Function to pause execution respecting rate limits
 function delay(ms) {
   console.log(`${new Date().toLocaleTimeString()}: Pausing for ${ms / 1000} seconds...`);
@@ -165,8 +93,15 @@ function delay(ms) {
 }
 
 const FETCH_INTERVAL = 1000 * 60 * 15; // 15 minutes
+let lastFetchTime = Date.now();
 // Function to fetch recent tweets for all known authors
 async function fetchRecentTweetsForAuthors(db) {
+  // wait the FETCH_INTERVAL before fetching again
+  if (Date.now() < lastFetchTime + FETCH_INTERVAL) {
+    console.log('Rate limit exceeded. Waiting for fetch interval to reset.');
+    return;
+  }
+
   const authorsCollection = db.collection('authors');
   // Get 10 authors sorted by last fetched time
 
@@ -178,7 +113,7 @@ async function fetchRecentTweetsForAuthors(db) {
 
     try {
       console.log(`Fetching tweets for author: ${author.username} (ID: ${author.id})`);
-      
+
       const params = {
         max_results: 10,
         exclude: 'retweets,replies',
@@ -204,11 +139,11 @@ async function fetchRecentTweetsForAuthors(db) {
         // Update author's last fetched timestamp and last fetched tweet ID
         await authorsCollection.updateOne(
           { id: author.id },
-          { 
-            $set: { 
+          {
+            $set: {
               lastFetched: Date.now(),
               last_fetched_id: tweetsResponse.data.meta.newest_id || null
-            } 
+            }
           },
           { upsert: true }
         );
@@ -246,20 +181,18 @@ async function main() {
     const mostRecentTweet = await dbCollection.findOne({}, { sort: { created_at: -1 } });
     let lastId = mostRecentTweet?.id;
 
-    while (true) {
-      try {
-        const timeline = await getHomeTimeline(lastId);
+    const timeline = await getHomeTimeline(lastId);
 
-        for (const tweet of timeline.data.data) {
-          await addTweetToMongoDB(db, tweet, timeline.includes);
-          lastId = lastId > tweet?.id ? lastId : tweet?.id;
-        }
+    if (!timeline.data || !timeline.data.data) {
+      console.error('Invalid timeline response:', timeline);
+      return;
+    }
 
-        if (!timeline.meta.next_token) break;
-      } catch (error) {
-        console.error('Error fetching home timeline:', error);
-      }
-    
+    for (const tweet of timeline.data.data) {
+      await addTweetToMongoDB(db, tweet, timeline.includes);
+      lastId = lastId > tweet?.id ? lastId : tweet?.id;
+    }
+
 
     console.log('Fetching recent tweets for all known authors.');
     await fetchRecentTweetsForAuthors(db);
@@ -270,7 +203,6 @@ async function main() {
     console.log('Done fetching tweets.');
 
     await delay(FETCH_INTERVAL);
-  }
   } catch (error) {
     console.error('Error initializing the scraper:', error);
     process.exit(1);
