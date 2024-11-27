@@ -20,10 +20,23 @@ const openai = new OpenAI({
 
 // Function to connect to MongoDB
 async function connectToMongoDB() {
-  const client = new MongoClient(process.env.MONGODB_URI);
-  await client.connect();
-  //console.log('Connected to MongoDB');
-  return client.db(process.env.DB_NAME);
+  const options = {
+    tls: true,
+    tlsAllowInvalidCertificates: process.env.NODE_ENV !== 'production',
+    tlsAllowInvalidHostnames: process.env.NODE_ENV !== 'production',
+    retryWrites: true,
+    w: 'majority'
+  };
+
+  try {
+    const client = new MongoClient(process.env.MONGODB_URI, options);
+    await client.connect();
+    console.log('Connected to MongoDB successfully');
+    return client.db(process.env.DB_NAME);
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    throw new Error(`Failed to connect to MongoDB: ${error.message}`);
+  }
 }
 
 async function summarizeRecentTweets(db, authorId, systemPrompt, prior) {
@@ -102,8 +115,9 @@ async function generateTweetResponse(prompt, systemPrompt, journalEntry) {
 
 // Main execution function
 async function main () {
+  let db;
   try {
-    const db = await connectToMongoDB();
+    db = await connectToMongoDB();
     const responsesCollection = db.collection('responses');
     const authorsCollection = db.collection('authors');
 
@@ -166,6 +180,8 @@ async function main () {
     }
   } catch (error) {
     console.error('Error generating tweet responses:', error);
+    // Wait for a minute before exiting to prevent rapid restarts
+    await new Promise(resolve => setTimeout(resolve, 60000));
     process.exit(1);
   }
 }

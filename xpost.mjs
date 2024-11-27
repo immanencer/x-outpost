@@ -11,58 +11,6 @@ const xClient = new TwitterApi({
     accessSecret: process.env.TWITTER_ACCESS_SECRET,
 });
 
-// Enhanced chunking function to split text into tweet-sized chunks prioritizing sentences and double line breaks
-function chunkText(text, chunkSize = 280) {
-    const paragraphs = text.split('\n\n'); // Split text into paragraphs first
-    const chunks = [];
-    let currentChunk = '';
-
-    for (const paragraph of paragraphs) {
-        const sentences = paragraph.split(/(?<=\.|\?|!)\s+/); // Split paragraph into sentences
-
-        for (const sentence of sentences) {
-            if (currentChunk.length + sentence.length + 1 > chunkSize) {
-                if (currentChunk.length > 0) {
-                    chunks.push(currentChunk.trim());
-                    currentChunk = '';
-                }
-
-                if (sentence.length > chunkSize) {
-                    const words = sentence.split(' ');
-                    for (const word of words) {
-                        if (currentChunk.length + word.length + 1 > chunkSize) {
-                            chunks.push(currentChunk.trim());
-                            currentChunk = word;
-                        } else {
-                            currentChunk += ` ${word}`;
-                        }
-                    }
-                } else {
-                    currentChunk += ` ${sentence}`;
-                }
-            } else {
-                currentChunk += ` ${sentence}`;
-            }
-        }
-
-        if (currentChunk.length > 0) {
-            chunks.push(currentChunk.trim());
-            currentChunk = '';
-        }
-    }
-
-    if (currentChunk.length > 0) {
-        chunks.push(currentChunk.trim());
-    }
-
-    return chunks;
-}
-
-// Function to delay execution (used for retries)
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 // Function to upload a single image buffer
 async function uploadImageBuffer(buffer, type = 'png') {
     try {
@@ -74,8 +22,6 @@ async function uploadImageBuffer(buffer, type = 'png') {
         throw error;
     }
 }
-
-// Enhanced function to post tweets with various options, image attachment, and error handling
 export async function postX(params, inReplyTo = '', imageBuffer = null) {
     const { text, ...otherParams } = params;
     const tweetChunks = chunkText(text || '');
@@ -88,14 +34,9 @@ export async function postX(params, inReplyTo = '', imageBuffer = null) {
     // Upload image if buffer is provided
     if (imageBuffer) {
         try {
-            // if the image Buffer exceeds 5242880 bytes (5MB), it will be resized
             while (imageBuffer.length > 5242880) {
                 console.log('🌳 Resizing image buffer...');
-
-                // Get image metadata first
                 const metadata = await sharp(imageBuffer).metadata();
-
-                // Calculate new dimensions (80% of original)
                 const newWidth = Math.floor(metadata.width * 0.8);
                 const newHeight = Math.floor(metadata.height * 0.8);
 
@@ -103,21 +44,21 @@ export async function postX(params, inReplyTo = '', imageBuffer = null) {
                     .resize(newWidth, newHeight)
                     .toBuffer();
             }
-
             mediaId = await uploadImageBuffer(imageBuffer);
         } catch (error) {
-            console.error('🌳 Failed to upload image, proceeding without it.', error);
+            console.error('🌳 Image upload failed; proceeding without attachment:', error);
         }
     }
 
     for (const chunk of tweetChunks) {
-        let success = false;
         let attempt = 0;
+        let success = false;
 
-        // Wait for a few seconds between each chunk
-        await delay(5000);
+        // Ensure a delay between tweets
+        if (attempt > 0) await delay(5000);
 
         while (attempt < maxRetries && !success) {
+            attempt++;
             try {
                 const tweetPayload = {
                     text: chunk,
@@ -131,42 +72,65 @@ export async function postX(params, inReplyTo = '', imageBuffer = null) {
                 }
 
                 const response = await xClient.v2.tweet(tweetPayload);
+                console.log(`🌳 Tweet posted successfully: ${response.data.id}`);
                 final_id = response.data.id;
-                console.log('🌳 Tweet posted successfully:', response);
-                await delay(1000); // Wait for a few seconds between each tweet
 
-                // Update inReplyToTweetId for the next tweet in the thread
+                // Update for next tweet in the thread
                 inReplyToTweetId = response.data.id;
                 success = true;
             } catch (error) {
-                attempt++;
                 console.error(`🌳 Error posting tweet (Attempt ${attempt}/${maxRetries}):`, error);
 
-                if (error.code === 403 || error.code === 400) {
-                    console.error('🌳 Invalid or forbidden tweet, skipping this chunk:', chunk);
-                    success = true;
-                    break;
-                }
 
-                if (error.rateLimit) {
-                    const waitTime = error.rateLimit.reset * 1000 - Date.now();
-                    console.log(`🌳 Rate limit reached, retrying after ${Math.ceil(waitTime / 60000)} minutes...`);
-                    await delay(waitTime);
+                if ([400, 403].includes(error.code)) {
+                    console.error(`🌳 Non-recoverable error: Skipping chunk due to invalid tweet.`);
+                    success = true; // Skip this chunk and continue
                 } else {
-                    console.log(`🌳 Retrying in ${attempt * 2} seconds...`);
-                    await delay(attempt * 2000); // Exponential backoff
+                    if (error.rateLimit) {
+                        const waitTime = (error.rateLimit.reset * 1000) - Date.now();
+                        console.log(`🌳 Rate limit hit. Waiting ${Math.ceil(waitTime / 60000)} minutes...`);
+                        await delay(waitTime);
+                    } else {
+                        const backoffTime = attempt * 2000;
+                        console.log(`🌳 Retrying in ${backoffTime / 1000}s...`);
+                        await delay(backoffTime);
+                    }
                 }
             }
         }
 
         if (!success) {
-            console.error('🌳 Failed to post tweet after multiple attempts, stopping further posts.');
+            console.error(`🌳 Failed to post tweet after ${maxRetries} attempts. Stopping further posts.`);
             break;
         }
     }
 
     return final_id;
 }
+
+/**
+ * Utility function to chunk long text into smaller tweets
+ */
+function chunkText(text) {
+    const maxTweetLength = 280;
+    const chunks = [];
+    let startIndex = 0;
+
+    while (startIndex < text.length) {
+        chunks.push(text.slice(startIndex, startIndex + maxTweetLength));
+        startIndex += maxTweetLength;
+    }
+
+    return chunks;
+}
+
+/**
+ * Utility function for delay
+ */
+async function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 
 // Add this function to xpost.mjs
 

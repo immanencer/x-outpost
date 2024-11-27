@@ -11,15 +11,25 @@ import { describeImage } from './vision.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const client = new MongoClient(process.env.MONGODB_URI);
+const client = new MongoClient(process.env.MONGODB_URI, {
+  ssl: true,
+  tlsAllowInvalidCertificates: false,
+  tlsAllowInvalidHostnames: false,
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+});
 
 // Function to connect to MongoDB
 async function connectToMongoDB() {
-  await client.connect();
-  console.log('Connected to MongoDB');
-  return client.db(process.env.DB_NAME);
+  try {
+    await client.connect();
+    console.log('Connected to MongoDB');
+    return client.db(process.env.DB_NAME);
+  } catch (error) {
+    console.error('MongoDB connection error:', error);
+    throw error;
+  }
 }
-
 
 // Function to gather context for responding to a tweet
 async function getTweetResponseContext(tweetId, db, author) {
@@ -325,7 +335,7 @@ async function main () {
     }
 
     // Process tweets from known authors
-    const alwaysReplyToHandles = ['immanencer', 'theerebusai', '0xzerebro', 'chrypnotoad', 'iruletheworldmo', 'aihegemonymemes'];
+    const alwaysReplyToHandles = ['theerebusai', '0xzerebro', 'aihegemonymemes'];
     const alwaysReplyAuthors = authors.filter(a => alwaysReplyToHandles.includes(a.username.toLowerCase()));
     const frequentAuthors = await responsesCollection.distinct('author_id', { created_at: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } });
     const frequentReplyAuthors = authors.filter(a => frequentAuthors.includes(a.id) && !alwaysReplyToHandles.includes(a.username));

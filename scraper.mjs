@@ -35,7 +35,6 @@ async function retryTwitterCall(apiCall, ...params) {
         const waitSeconds = Math.max(resetTime - currentTime, 5);
         console.error(`Rate limit exceeded. Waiting for ${waitSeconds} seconds before retrying.`);
         await delay(waitSeconds * 1000);
-
       } else {
         console.error('Unexpected error:', error, params);
         throw error;
@@ -93,24 +92,16 @@ function delay(ms) {
 }
 
 const FETCH_INTERVAL = 1000 * 60 * 15; // 15 minutes
-let lastFetchTime = Date.now();
+
 // Function to fetch recent tweets for all known authors
 async function fetchRecentTweetsForAuthors(db) {
-  // wait the FETCH_INTERVAL before fetching again
-  if (Date.now() < lastFetchTime + FETCH_INTERVAL) {
-    console.log('Rate limit exceeded. Waiting for fetch interval to reset.');
-    return;
-  }
-
   const authorsCollection = db.collection('authors');
   // Get 10 authors sorted by last fetched time
-
   const authors = await authorsCollection.find({}).sort({ lastFetched: 1 }).limit(10).toArray();
 
   console.log(`Fetching recent tweets for ${authors.length} authors...`);
 
   for (const author of authors) {
-
     try {
       console.log(`Fetching tweets for author: ${author.username} (ID: ${author.id})`);
 
@@ -123,7 +114,7 @@ async function fetchRecentTweetsForAuthors(db) {
       };
 
       console.log('5 second delay before fetching tweets...');
-      await delay(5000); // 1 second delay
+      await delay(5000); // 5-second delay
       console.log('Requesting user timeline with params:', params);
       const tweetsResponse = await retryTwitterCall(
         xClient.v2.userTimeline.bind(xClient.v2),
@@ -154,7 +145,7 @@ async function fetchRecentTweetsForAuthors(db) {
       }
 
       // Optional: Delay between API calls to respect rate limits
-      await delay(1000); // 1 second delay
+      await delay(1000); // 1-second delay
     } catch (error) {
       console.error(`Error fetching tweets for author ${author.username}:`, error);
       if (error.code === 429) {
@@ -170,39 +161,33 @@ async function fetchRecentTweetsForAuthors(db) {
   console.log('Completed fetching tweets for all known authors.');
 }
 
-
 async function main() {
   try {
     const db = await connectToMongoDB();
     const dbCollection = db.collection('tweets');
 
-    //    console.log('Connected to Twitter as user:', (await retryTwitterCall(xClient.v2.user.bind(xClient.v2), process.env.TWITTER_USER_ID)).data.username);
+    while (true) {
+      console.log('Starting new fetch cycle...');
+      const mostRecentTweet = await dbCollection.findOne({}, { sort: { created_at: -1 } });
+      let lastId = mostRecentTweet?.id;
 
-    const mostRecentTweet = await dbCollection.findOne({}, { sort: { created_at: -1 } });
-    let lastId = mostRecentTweet?.id;
+      const timeline = await getHomeTimeline(lastId);
 
-    const timeline = await getHomeTimeline(lastId);
+      if (!timeline.data || !timeline.data.data) {
+        console.error('Invalid timeline response:', timeline);
+      } else {
+        for (const tweet of timeline.data.data) {
+          await addTweetToMongoDB(db, tweet, timeline.includes);
+          lastId = lastId > tweet?.id ? lastId : tweet?.id;
+        }
+      }
 
-    if (!timeline.data || !timeline.data.data) {
-      console.error('Invalid timeline response:', timeline);
-      return;
+      console.log('Fetching recent tweets for all known authors.');
+      await fetchRecentTweetsForAuthors(db);
+
+      console.log('Done fetching tweets. Waiting for the next fetch cycle...');
+      await delay(FETCH_INTERVAL);
     }
-
-    for (const tweet of timeline.data.data) {
-      await addTweetToMongoDB(db, tweet, timeline.includes);
-      lastId = lastId > tweet?.id ? lastId : tweet?.id;
-    }
-
-
-    console.log('Fetching recent tweets for all known authors.');
-    await fetchRecentTweetsForAuthors(db);
-
-    console.log('Filling out missing author IDs for tweets.');
-    await fillMissingAuthorIds(db);
-
-    console.log('Done fetching tweets.');
-
-    await delay(FETCH_INTERVAL);
   } catch (error) {
     console.error('Error initializing the scraper:', error);
     process.exit(1);

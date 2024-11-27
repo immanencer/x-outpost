@@ -84,9 +84,17 @@ async function postGeneratedResponses() {
             { $set: { posted: true, response_id: tweetId } }
           );
           console.log(`Successfully posted response with ID ${responseDoc._id} as tweet ID ${tweetId}`);
+        } else  {
+          throw new Error("Failed to post.");
         }
       } catch (error) {
         console.error(`Error posting response with ID ${responseDoc._id}:`, error);
+        
+        // Update the response in the database to mark it as posted
+        await responsesCollection.updateOne(
+          { _id: responseDoc._id },
+          { $set: { posted: true, response_id: null, error: error.message } }
+        );
       }
 
       // Wait for 10 minutes before posting the next response
