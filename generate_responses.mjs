@@ -120,18 +120,22 @@ async function main () {
     db = await connectToMongoDB();
     const responsesCollection = db.collection('responses');
     const authorsCollection = db.collection('authors');
-
+    const postsCollection = db.collection('tweets');
 
     const bobId = await authorsCollection.findOne({ username: 'bobthesnek' }).then(a => a.id);
     const prompts = await responsesCollection.find({
       author_id: { $ne: bobId },
-      response: { $exists: false }
+      response: { $exists: false },
+      processed_by: 'llm_context',  // Only process items that have context
+      processed_at: { $exists: true }
     }).toArray();
 
     if (prompts.length === 0) {
-      console.log('No prompts found without responses.');
+      console.log('No prepared prompts found to process.');
       return;
     }
+
+    console.log(`Found ${prompts.length} prepared prompts to process`);
 
     // Specify your system prompt
     // Load the system prompt from a file assets/system_prompt.txt
@@ -154,24 +158,36 @@ async function main () {
 
 
     for (const promptDoc of prompts) {
+      console.log(`Processing prompt for tweet ${promptDoc.tweet_id}`);
       // get the prompt for the author if it exists
       const prompt_ = await authorsCollection.findOne({ id: promptDoc.author_id }).then(a => a.prompt);
+      const tweet = await postsCollection.findOne({ id: promptDoc.tweet_id });
+      const author_id = tweet.author_id || promptDoc.author_id;
+      const recent_posts = await postsCollection.find({author_id: author_id }).sort({id: -1}).limit(100).toArray();
+      recent_posts.reverse();
       const prompt = await summarizeRecentTweets(
         db, promptDoc.author_id, 
-        systemPrompt, prompt_ + `${promptDoc.prompt}`
+        systemPrompt, prompt_ + `
+        ${recent_posts.map(T => T.text).join("\n")}
+        ${promptDoc.context}`
       );
       // Update the prompt in author's database
       await authorsCollection.updateOne(
         { id: promptDoc.author_id },
         { $set: { prompt: prompt } }
       );
-      const tweetResponse = await generateTweetResponse(prompt + promptDoc.prompt, systemPrompt, journalEntry);
+      const tweetResponse = await generateTweetResponse(`You have these feelings towards the author you are responding to: ${prompt}\nHere is some recent context:\n\n` + promptDoc.context, systemPrompt, journalEntry);
 
       if (tweetResponse) {
         // Update the response in the database
         await responsesCollection.updateOne(
           { tweet_id: promptDoc.tweet_id },
-          { $set: { response: tweetResponse } }
+          { 
+            $set: { 
+              response: tweetResponse,
+              response_generated_at: new Date()
+            }
+          }
         );
         console.log(`Generated response for tweet ID ${promptDoc.tweet_id}: ${tweetResponse}`);
       } else {

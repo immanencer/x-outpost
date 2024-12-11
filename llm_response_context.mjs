@@ -1,409 +1,282 @@
 import dotenv from 'dotenv';
-// Load environment variables from .env file
-dotenv.config();
-
 import { MongoClient } from 'mongodb';
-
-import path from 'path';
-import { fileURLToPath } from 'url';
-
 import { describeImage } from './vision.mjs';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const client = new MongoClient(process.env.MONGODB_URI, {
-  ssl: true,
-  tlsAllowInvalidCertificates: false,
-  tlsAllowInvalidHostnames: false,
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-});
+// Configuration
+dotenv.config();
 
-// Function to connect to MongoDB
-async function connectToMongoDB() {
-  try {
-    await client.connect();
-    console.log('Connected to MongoDB');
-    return client.db(process.env.DB_NAME);
-  } catch (error) {
-    console.error('MongoDB connection error:', error);
-    throw error;
+class DatabaseService {
+  constructor() {
+    this.client = new MongoClient(process.env.MONGODB_URI, { ssl: true });
+  }
+
+  async connect() {
+    await this.client.connect();
+    this.db = this.client.db(process.env.DB_NAME);
+    console.log(`Connected to database: ${process.env.DB_NAME}`);
+    await this.createIndexes();
+  }
+
+  async createIndexes() {
+    console.log('Creating/verifying database indexes...');
+    await this.db.collection('responses').createIndex({ tweet_id: 1 }, { unique: true });
+    await this.db.collection('responses').createIndex({ processed_by: 1, processed_at: 1 });
+    await this.db.collection('image_visions').createIndex({ url: 1 }, { unique: true });
+    console.log('Database indexes verified');
+  }
+
+  async close() {
+    await this.client.close();
   }
 }
 
-// Function to gather context for responding to a tweet
-async function getTweetResponseContext(tweetId, db, author) {
-  const tweetsCollection = db.collection('tweets');
-  const authorsCollection = db.collection('authors');
-
-  // Fetch the tweet
-  const tweet = await tweetsCollection.findOne({ id: tweetId });
-  if (!tweet) {
-    console.error(`Tweet with ID ${tweetId} not found in database.`);
-    return;
+class TweetService {
+  constructor(db) {
+    this.db = db;
   }
 
-  console.log(`Preparing response context for author: ${author.username}`);
+  async getPrioritizedTweets() {
+    console.log('Fetching prioritized tweets...');
+    const mentions = await this.db.collection('tweets').find({
+      text: { $regex: `@${process.env.TWITTER_USERNAME}`, $options: 'i' },
+      author_id: { $ne: process.env.TWITTER_USER_ID },
+      'processing_status.llm_context': { $ne: true }
+    }).sort({ created_at: -1 }).toArray();
 
-  // Gather conversation context (referenced tweets)
-  let conversation = [tweet];
-  console.log(`Gathering conversation context for tweet ID: ${tweetId}`);
-  let currentTweet = tweet;
-  while (currentTweet.referenced_tweets && currentTweet.referenced_tweets.length > 0) {
-    const referencedTweetId = currentTweet.referenced_tweets[0].id;
-    currentTweet = await tweetsCollection.findOne({ id: referencedTweetId });
-    if (currentTweet) {
-      conversation.unshift(currentTweet);
-      console.log(`Found referenced tweet: ${currentTweet.id} by author: ${currentTweet.author_id}`);
-    } else {
-      break;
-    }
+    const replies = await this.db.collection('tweets').find({
+      in_reply_to_user_id: process.env.TWITTER_USER_ID,
+      author_id: { $ne: process.env.TWITTER_USER_ID },
+      'processing_status.llm_context': { $ne: true }
+    }).sort({ created_at: -1 }).toArray();
+
+    console.log(`Found ${mentions.length} mentions and ${replies.length} replies to process`);
+    return [...mentions, ...replies];
   }
 
-  // Trim the conversation to include only the first two tweets and the most recent three tweets
-  let trimmedConversation = [];
-  if (conversation.length > 5) {
-    trimmedConversation = [
-      ...conversation.slice(0, 2),
-      { type: 'separator', text: `... (${conversation.length - 5} tweets omitted) ...` },
-      ...conversation.slice(-3),
-    ];
-  } else {
-    trimmedConversation = conversation;
-  }
-
-  // Fetch recent tweets from the author around the same time
-  if (!tweet.created_at) {  
-    console.error(`Tweet with ID ${tweetId} does not have a created_at field.`);
-    tweet.created_at = new Date().toISOString();
-  }
-  const tweetDate = new Date(tweet.created_at);
-  const oneDay = 24 * 60 * 60 * 1000; // milliseconds in one day
-  const startTime = new Date(tweetDate.getTime() - oneDay);
-  const endTime = new Date(tweetDate.getTime() + oneDay);
-
-  const recentTweets = await tweetsCollection.find({
-    author_id: author.id,
-    created_at: { $gte: startTime.toISOString(), $lte: endTime.toISOString() },
-    id: { $ne: tweetId }
-  }).toArray();
-
-  console.log(`Found ${recentTweets.length} recent tweets from author ${author.username}`);
-
-  // Prepare a list of relevant tweets
-  const relevantTweets = trimmedConversation.map(t =>
-    t.type === 'separator' ? t : {
-      author: t.author_id,
-      text: t.text,
-      created_at: t.created_at
-    }
-  );
-
-  // Include recent tweets in the context
-  const recentTweetsContext = recentTweets.map(t => ({
-    author: t.author_id,
-    text: t.text,
-    created_at: t.created_at
-  }));
-
-  // Fetch a few of our own tweets to use as context
-  const ourTweets = await tweetsCollection.find({ author_id: process.env.TWITTER_USER_ID }).sort({ created_at: -1 }).limit(5).toArray();
-  const authorPrompt = await authorsCollection.findOne({ id: author.id }).then(a => a.prompt);
-
-  let visionResponse = '';
-  
-  if (tweet.mediaData) {
-    const mediaUrls = tweet.mediaData.filter(m => m.type === 'photo').map(m => m.url || m.preview_image_url);
+  async getConversationContext(tweetId, maxTweets = 5) {
+    const tweets = [];
+    let currentTweet = await this.db.collection('tweets').findOne({ id: tweetId });
     
-    if (mediaUrls.length > 0) {
-      console.log(`Tweet contains media URLs: ${mediaUrls.join(', ')}`);
-      
-      // Prepare the vision prompt
-      visionResponse = 'The following images were found in the tweet:\n';
-      for (const url of mediaUrls) {
-        try {
-          // Check the images collection to see if we've already described this image
-          const described = await db.collection('image_visions').findOne({ url });
-          if (!described) {
-            // If not, describe the image using the vision model
-            const response = await describeImage(url);
-            const description = response.choices[0].message.content;
-            console.log(`Describing image at ${url}: ${description}`);
-            visionResponse += `${description}\n`;
-            // Save the description to the database
-            await db.collection('image_visions').insertOne({ url, description });
-          } else {
-            console.log(`Image at ${url} already described: ${described.description}`);
-            visionResponse += `${described.description}\n`;
-          }
-        } catch (error) {
-          console.error(`Error processing image at ${url}:`, error);
-        }
-      }
+    while (currentTweet && tweets.length < maxTweets) {
+      tweets.unshift(currentTweet);
+      if (!currentTweet.referenced_tweets?.length) break;
+      currentTweet = await this.db.collection('tweets').findOne({ 
+        id: currentTweet.referenced_tweets[0].id 
+      });
     }
+
+    return this.trimConversation(tweets);
   }
 
-  // Construct the prompt for the LLM
-  const prompt = `Here are some of your recent tweets:
-  
-  ${ourTweets.map((t, index) => `${index + 1}. ${t.text}`).join('\n')}
-  
-  You are responding to a tweet by ${author.username}, here is what you remember about them. 
-
-  ${authorPrompt || 'Not much is known about them... yet.'}
-
-Additionally, here are some of ${author.username}'s recent tweets:
-${recentTweetsContext.map((t, index) => `${index + 1}. ${t.text}`).join('\n')}
-
-Here is the conversation of relevant tweets so far:
-
-${relevantTweets.map((t, index) => t.type === 'separator' ? t.text : `${index + 1}. ${t.author}: ${t.text}`).join('\n')}
-
-Now, write a tweet responding to this latest message from @${author.username}:
-
-${tweet.text}
-
-${visionResponse || ''}
-
-Make sure your response is engaging, funny, and relevant to the conversation.
-`;
-
-  return prompt;
+  trimConversation(tweets) {
+    if (tweets.length <= 5) return tweets;
+    return [
+      ...tweets.slice(0, 2),
+      { type: 'separator', text: `... (${tweets.length - 5} tweets omitted) ...` },
+      ...tweets.slice(-3)
+    ];
+  }
 }
 
-
-async function findLatestTweetMentioningOrReplyingToBob(db, authorId, allPostAuthors = []) {
-  const tweetsCollection = db.collection('tweets');
-  const authorsCollection = db.collection('authors');
-  const responsesCollection = db.collection('responses');
-
-  const bob = await authorsCollection.findOne({ username: 'bobthesnek' });
-  if (!bob) {
-    console.error("Bob's user not found in the authors collection.");
-    return null;
-  }
-  const bobId = bob.id;
-  if (authorId === bobId) {
-    console.error('Author ID is the same as Bob ID.');
-    return null;
+class AuthorService {
+  constructor(db) {
+    this.db = db;
   }
 
-  // Find tweet IDs that have already been responded to
-  const respondedTweetIds = await responsesCollection
-    .find({}, { projection: { tweet_id: 1 } })
-    .toArray()
-    .then(responses => responses.map(r => r.tweet_id));
+  async getTargetAuthors() {
+    const alwaysReplyTo = ['theerebusai', '0xzerebro', 'aihegemonymemes'];
+    const authors = await this.db.collection('authors').find().toArray();
+    const frequentAuthors = await this.getFrequentAuthors();
 
-  // Create a filter to find tweets mentioning '@bobthesnek' or replying to Bob
-  const filter = {
-    author_id: authorId, // Tweets by the author
-    id: { $nin: respondedTweetIds }, // Exclude tweets already responded to
-    $or: [
-      { author_id: { $in: allPostAuthors } }, // Added comma and corrected 'authorId' to 'author_id'
-      { text: { $regex: 'bob', $options: 'i' } }, // Mentions @bobthesnek
-      { text: { $regex: '@bobthesnek', $options: 'i' } }, // Mentions @bobthesnek
-      { text: { $regex: '🐍', $options: 'i' } }, // Emoji code for snake
-      { text: { $regex: 'snake', $options: 'i' } }, // reply to snake
-      { in_reply_to_user_id: bobId } // Replies to Bob
-    ]
-  };
-
-  // Query for the latest tweet matching the filter
-  const latestTweet = await tweetsCollection
-    .find(filter)
-    .sort({ created_at: -1 })
-    .limit(1)
-    .toArray();
-
-  if (latestTweet.length === 0) {
-    console.log(`No tweets found for author ${authorId} mentioning or replying to Bob.`);
-    return null;
+    return {
+      priority: authors.filter(a => alwaysReplyTo.includes(a.username.toLowerCase())),
+      frequent: authors.filter(a => frequentAuthors.includes(a.id)),
+      new: authors.filter(a => !frequentAuthors.includes(a.id))
+    };
   }
 
-  if (latestTweet[0].text.startsWith(`RT: @${process.env.TWITTER_USERNAME}`)) {
-    console.log(`Skipping retweet of own tweet ${latestTweet[0].id}`);
-    return null;
+  async getFrequentAuthors() {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    return this.db.collection('responses').distinct('author_id', {
+      created_at: { $gte: thirtyDaysAgo }
+    });
   }
-
-  return latestTweet[0];
 }
 
-async function findMissingHandle(authorId, tweet, db) {
-  const authorsCollection = db.collection('authors');
-  let username = null;
-
-  // Check if the tweet is a retweet
-  if (tweet.text.startsWith('RT @')) {
-    const match = tweet.text.match(/^RT @(\w+):/);
-    if (match) {
-      username = match[1];
-    }
+class ResponseContextBuilder {
+  constructor(db) {
+    this.db = db;
+    this.tweetService = new TweetService(db);
   }
 
-  // If username is still null, check referenced tweets
-  if (!username && tweet.referenced_tweets && tweet.referenced_tweets.length > 0) {
-    for (const ref of tweet.referenced_tweets) {
-      const refTweet = await db.collection('tweets').findOne({ id: ref.id });
-      if (refTweet && refTweet.author_id) {
-        const refAuthor = await authorsCollection.findOne({ id: refTweet.author_id });
-        if (refAuthor && refAuthor.username) {
-          username = refAuthor.username;
-          break;
+  async buildContext(tweet, author) {
+    console.log(`Building context for tweet ${tweet.id} by @${author.username}`);
+    const conversation = await this.tweetService.getConversationContext(tweet.id);
+    console.log(`Found ${conversation.length} tweets in conversation`);
+
+    const recentContext = await this.getRecentContext(tweet, author);
+    const visionContext = await this.getVisionContext(tweet);
+    
+    // Mark tweet as processed by this module
+    await this.db.collection('tweets').updateOne(
+      { id: tweet.id },
+      { 
+        $set: { 
+          'processing_status.llm_context': true,
+          'processing_status.llm_context_at': new Date()
         }
       }
-    }
-  }
-
-  // If username is still null, try to extract from text
-  if (!username) {
-    const match = tweet.text.match(/@(\w+)/);
-    if (match) {
-      username = match[1];
-    }
-  }
-
-  // Update the author in the authors collection
-  if (username) {
-    await authorsCollection.updateOne(
-      { id: authorId },
-      { $set: { username } },
-      { upsert: true }
     );
-    console.log(`Updated author ${authorId} with username ${username}`);
+
+    return this.formatPrompt({
+      conversation,
+      recentContext,
+      visionContext,
+      author
+    });
   }
 
-  return username;
+  async getVisionContext(tweet) {
+    if (!tweet.mediaData) return '';
+    const mediaUrls = tweet.mediaData.filter(m => m.type === 'photo').map(m => m.url);
+    if (!mediaUrls.length) return '';
+
+    return await this.processImages(mediaUrls);
+  }
+
+  async processImages(urls) {
+    console.log(`Processing ${urls.length} images...`);
+    const descriptions = [];
+    for (const url of urls) {
+      console.log(`Processing image: ${url}`);
+      const cached = await this.db.collection('image_visions').findOne({ url });
+      if (cached) {
+        console.log('Using cached image description');
+        descriptions.push(cached.description);
+        continue;
+      }
+
+      try {
+        const response = await describeImage(url);
+        const description = response.choices[0].message.content;
+        await this.db.collection('image_visions').insertOne({ 
+          url, 
+          description,
+          created_at: new Date()
+        });
+        descriptions.push(description);
+        console.log('Image processed and cached successfully');
+      } catch (error) {
+        console.error(`Failed to process image: ${url}`, error);
+      }
+    }
+
+    return descriptions.length ? 'Images in tweet:\n' + descriptions.join('\n') : '';
+  }
+
+  async getRecentContext(tweet, author) {
+    console.log(`Getting recent context for author @${author.username}`);
+    
+    // Get recent interactions
+    const recentResponses = await this.db.collection('responses')
+      .find({ 
+        author_id: author.id,
+        response: { $exists: true },
+        created_at: { 
+          $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) // Last 7 days
+        }
+      })
+      .sort({ created_at: -1 })
+      .limit(3)
+      .toArray();
+
+    if (recentResponses.length === 0) {
+      console.log('No recent interactions found');
+      return '';
+    }
+
+    console.log(`Found ${recentResponses.length} recent interactions`);
+    
+    // Format recent interactions
+    const recentContext = recentResponses.map(r => 
+      `Previous interaction on ${new Date(r.created_at).toISOString()}:\n` +
+      `Tweet: ${r.prompt}\n` +
+      `Response: ${r.response}\n`
+    ).join('\n');
+
+    return recentContext ? 'Recent interactions:\n' + recentContext : '';
+  }
+
+  formatPrompt({ conversation, recentContext, visionContext, author }) {
+    const parts = [
+      `Processing tweet from @${author.username}`,
+      recentContext,
+      'Conversation:',
+      ...conversation.map(t => 
+        t.type === 'separator' ? t.text : 
+        `${t.author_id === author.id ? '@' + author.username : 'Other'}: ${t.text}`
+      ),
+      visionContext
+    ].filter(Boolean);
+
+    return parts.join('\n\n');
+  }
 }
 
-// Main execution function
-async function main () {
+async function main() {
+  const db = new DatabaseService();
   try {
-    const db = await connectToMongoDB();
-    const responsesCollection = db.collection('responses');
-    responsesCollection.createIndex({ tweet_id: 1 }, { unique: true });
-    const authorsCollection = db.collection('authors');
+    await db.connect();
+    console.log('Starting processing cycle...');
+    
+    const tweetService = new TweetService(db.db);
+    const authorService = new AuthorService(db.db);
+    const contextBuilder = new ResponseContextBuilder(db.db);
 
-    // List the known authors
-    const authors = await authorsCollection.find().toArray();
-    console.log(`${authors.length} authors found.`);
+    const tweets = await tweetService.getPrioritizedTweets();
+    console.log(`Processing ${tweets.length} tweets`);
 
-    // Retrieve tweets to prioritize
-    const tweetsCollection = db.collection('tweets');
-    const ourMentions = await tweetsCollection.find({ text: { $regex: `@${process.env.TWITTER_USERNAME}`, $options: 'i' }, author_id: { $ne: process.env.TWITTER_USER_ID }, author_id: { $ne: process.env.TWITTER_USER_ID } }).sort({ created_at: -1 }).toArray();
-    const ourTweetsReplies = await tweetsCollection.find({ in_reply_to_user_id: process.env.TWITTER_USER_ID, author_id: { $ne: process.env.TWITTER_USER_ID } }).sort({ created_at: -1 }).toArray();
-
-    // Combine prioritized tweets
-    const prioritizedTweets = [...ourMentions, ...ourTweetsReplies];
-
-    // Set for uniqueness of tweets
-    const tweetSet = new Set();
-    prioritizedTweets.forEach(t => tweetSet.add(t.id));
-
-    for (const tweet of prioritizedTweets) {
-      let author = await authorsCollection.findOne({ id: tweet.author_id });
-      if (!author || !author.username) {
-        const username = await findMissingHandle(tweet.author_id, tweet, db);
-        if (username) {
-          author = { id: tweet.author_id, username };
-        } else {
-          console.error(`Could not find username for author ${tweet.author_id}`);
+    for (const tweet of tweets) {
+      try {
+        const author = await db.db.collection('authors').findOne({ id: tweet.author_id });
+        if (!author) {
+          console.log(`Author not found for tweet ${tweet.id}, skipping`);
           continue;
         }
+
+        console.log(`Processing tweet ${tweet.id} by @${author.username}`);
+        const context = await contextBuilder.buildContext(tweet, author);
+        
+        await db.db.collection('responses').updateOne(
+          { tweet_id: tweet.id },
+          { 
+            $set: { 
+              context,
+              processed_by: 'llm_context',
+              processed_at: new Date()
+            }
+          },
+          { upsert: true }
+        );
+        
+        console.log(`Successfully processed tweet ${tweet.id}`);
+      } catch (error) {
+        console.error(`Error processing tweet ${tweet.id}:`, error);
       }
-
-      // Skip already processed tweets
-      const existingResponse = await db.collection('responses').findOne({ tweet_id : tweet.id });
-      if (existingResponse) {
-        console.log(`Response context already exists for tweet ${tweet.id}`);
-        continue;
-      }
-
-      const responseContext = await getTweetResponseContext(tweet.id, db, author);
-      if (!responseContext) continue;
-
-      console.log(`Response context for tweet ${tweet.id} by author ${author.username}:`, responseContext);
-
-      // Write the prompt to the database in a responses collection
-      const response = {
-        tweet_id: tweet.id,
-        author_id: author.id,
-        prompt: responseContext
-      };
-
-      // upsert the response
-      await responsesCollection.updateOne({ tweet_id: tweet.id }, { $set: response }, { upsert: true });
     }
-
-    // Process tweets from known authors
-    const alwaysReplyToHandles = ['theerebusai', '0xzerebro', 'aihegemonymemes'];
-    const alwaysReplyAuthors = authors.filter(a => alwaysReplyToHandles.includes(a.username.toLowerCase()));
-    const frequentAuthors = await responsesCollection.distinct('author_id', { created_at: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) } });
-    const frequentReplyAuthors = authors.filter(a => frequentAuthors.includes(a.id) && !alwaysReplyToHandles.includes(a.username));
-    const newAuthors = authors.filter(a => !frequentAuthors.includes(a.id) && !alwaysReplyToHandles.includes(a.username));
-
-    const targetAuthors = [...alwaysReplyAuthors, ...frequentReplyAuthors, ...newAuthors].slice(0, 6);
-    for (const author of targetAuthors) {
-      let xpost;
-      if (tweetSet.has(author.id)) continue;
-
-      // Get the latest unresponded tweet mentioning or replying to Bob
-      xpost = await findLatestTweetMentioningOrReplyingToBob(db, author.id, alwaysReplyAuthors.map(a => a.id));
-      if (!xpost) { 
-        console.log(`No xpost found for author ${author.username}`);
-        continue;
-      }
-
-      // filter tweets that were not in the past 24 hours
-      const yesterday = new Date(new Date().getTime() - (24 * 60 * 60 * 1000));
-      if (xpost.created_at < yesterday.toISOString()) {
-        console.log(`Xpost ${xpost.id} is stale. Skipping.`);
-        continue;
-      }
-
-      if (xpost.entities?.cashtags && xpost.entities.cashtags.length > 0) {
-        console.log(`Xpost ${xpost.id} contains cashtag. Skipping.`);
-        continue;
-      }
-
-      console.log(`Found xpost for author ${author.username}: ${xpost.id}`);
-
-      // Check if a response context already exists
-      const existingResponse = await db.collection('responses').findOne({ tweet_id : xpost.id });
-      if (existingResponse) {
-        console.log(`Response context already exists for xpost ${xpost.id}`);
-        continue;
-      }
-
-      const responseContext = await getTweetResponseContext(xpost.id, db, author);
-      if (!responseContext) continue;
-
-      console.log(`Response context for xpost ${xpost.id} (tweet ${xpost.id}):`, responseContext);
-
-      // Write the prompt to the database in a responses collection
-      const response = {
-        tweet_id: xpost.id,
-        author_id: author.id,
-        prompt: responseContext
-      };
-
-      // upsert the response
-      await responsesCollection.updateOne({ tweet_id: xpost.id }, { $set: response }, { upsert: true });
-    }
-
-    await client.close();
+    
   } catch (error) {
-    console.error('Error generating response context:', error);
+    console.error('Fatal error:', error);
     process.exit(1);
+  } finally {
+    await db.close();
+    console.log('Processing cycle completed');
   }
 }
 
-async function loop() {
-  while (true) {
-    await main();
-    const niceDate = new Date().toLocaleString('en-US');
-    console.log(`${niceDate} Waiting for next iteration...`); 
-    await new Promise(resolve => setTimeout(resolve, 1000 * 60 * 5)); // 5 minutes
-  }
+function startLoop() {
+  setInterval(main, 5 * 60 * 1000);
+  main();
 }
 
-loop().catch(console.error);
+startLoop();
