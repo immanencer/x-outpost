@@ -1,38 +1,47 @@
 import process from 'process';
-const { OPENAI_API_KEY, OPENAI_API_URI, VISION_MODEL } = process.env;
-
-if (!OPENAI_API_KEY) {
-    throw new Error('OPENAI_API_KEY is required');
-}
-if (!OPENAI_API_URI) {
-    throw new Error('OPENAI_API_URI is required');
-}
-if(!VISION_MODEL){
-    throw new Error('VISION_MODEL is required');
-}
+const { OPENAI_API_URI, OPENAI_API_KEY } = process.env;
 
 import OpenAI from "openai";
+
 const openai = new OpenAI({
+    baseURL: OPENAI_API_URI,
     apiKey: OPENAI_API_KEY,
-    baseURL: OPENAI_API_URI
+    defaultHeaders: {
+        "HTTP-Referer": "https://ratimics.com", // Replace with your site URL (optional)
+        "X-Title": "Bob the Snake" // Replace with your app name (optional)
+    }
 });
 
 export async function describeImage(fileUrl) {
-    // Get description from vision model
-    const response = await openai.chat.completions.create({
-        model: VISION_MODEL,
-        messages: [
-            { role: "system", content: "You are a helpful AI." },
-            {
-                role: "user",
-                content: [
-                    { type: "text", text: "Describe the contents of the image in detail" },
-                    { type: "image_url", url: fileUrl }
-                ],
-            },
-        ],
-        max_tokens: 128,
-    });
+    try {
+        const response = await openai.chat.completions.create({
+            model: "meta-llama/llama-3.2-90b-vision-instruct",
+            messages: [
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "text",
+                            text: "Describe the contents of the image in detail."
+                        },
+                        {
+                            type: "image_url",
+                            image_url: {
+                                url: fileUrl
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
 
-    return response;
+        if (!response.choices || !response.choices[0]) {
+            return 'No description available.';
+        }
+
+        return response.choices[0]?.message?.content || 'No description available.';
+    } catch (error) {
+        console.error("Error describing image:", error);
+        throw new Error("Failed to describe image. Please try again.");
+    }
 }

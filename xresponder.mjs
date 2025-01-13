@@ -1,137 +1,170 @@
 import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
-import { postX, likeTweet } from './xpost.mjs'; // Import the postX function
+import { postX } from './xpost.mjs'; // Import the postX function
 import process from 'process';
 
-// Load environment variables from .env file
+// Load environment variables
 dotenv.config();
 
-// New configuration option to disable replies to authors you aren't following
+// Configurations
 const REPLY_TO_UNFOLLOWED = process.env.REPLY_TO_UNFOLLOWED === 'true';
+const POST_INTERVAL_MINUTES = parseInt(process.env.POST_INTERVAL_MINUTES || '30', 10) * 60 * 1000;
+const MONGODB_URI = process.env.MONGODB_URI;
+const DB_NAME = process.env.DB_NAME;
 
-// Function to connect to MongoDB
-async function connectToMongoDB() {
-  const client = new MongoClient(process.env.MONGODB_URI);
-  await client.connect();
-  console.log('Connected to MongoDB');
-  return client.db(process.env.DB_NAME);
-}
+// Optional: TLS/SSL configurations if needed
+// Adjust as appropriate for your environment (self-signed certs, CA file, etc.)
+// For production, do NOT allow invalid certificates.
+const mongoOptions = {
+  // Uncomment or add your needed TLS options here:
+  // tls: true,
+  // tlsCAFile: '/path/to/rootCA.pem',
+  // tlsAllowInvalidCertificates: true, // Use with caution!
+};
 
 let db;
+let client;
 
-// Function to get a list of accounts we are following
-async function getFollowing() {
-  const followingCollection = db.collection('following');
-  return await followingCollection.find({}).toArray();
+// Delay utility
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Exponential backoff retry utility
+async function retryOperation(operation, retries = 3, delayMs = 1000) {
+  let lastError;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      console.error(`Attempt ${attempt + 1} failed: ${error.message}`);
+      if (attempt < retries - 1) {
+        await delay(delayMs * Math.pow(2, attempt)); // exponential backoff
+      }
+    }
+  }
+  throw lastError || new Error('All retry attempts failed');
 }
 
-// Function to post tweets every 30 minutes
+// Connect to MongoDB with retry logic
+async function connectToMongoDBWithRetry(retries = 5) {
+  return retryOperation(async () => {
+    client = new MongoClient(MONGODB_URI, mongoOptions);
+    await client.connect();
+    console.log('Connected to MongoDB successfully');
+    return client.db(DB_NAME);
+  }, retries, 2000); // try up to 5 times, base delay of 2s
+}
+
+// Fetch list of users we’re following
+async function getFollowing() {
+  return db.collection('following').find({}, { projection: { id: 1 } }).toArray();
+}
+
+// Post generated responses
 async function postGeneratedResponses() {
   try {
     const responsesCollection = db.collection('responses');
+    const tweetsCollection = db.collection('tweets');
 
-    // Get a list of authors we are following
-    const following = await getFollowing();
-    const followingIds = following.map(f => f.id);
+    const followingIds = (await getFollowing()).map((f) => f.id);
 
-    // Fetch all unposted responses
-    let unpostedResponses = await responsesCollection.find({
-      response: { $exists: true },
-      posted: { $exists: false }
-    }).toArray();
+    const responses = await responsesCollection
+      .find({ response: { $exists: true }, posted: { $exists: false } })
+      .toArray();
 
-    if (unpostedResponses.length === 0) {
+    if (responses.length === 0) {
       console.log('No unposted responses found.');
       return;
     }
 
-    const tweetsCollection = db.collection('tweets');
-
-    // Enrich responses with author information
-    for (const responseDoc of unpostedResponses) {
-      const tweet = await tweetsCollection.findOne({ id: responseDoc.tweet_id });
-      if (tweet && tweet.author_id) {
-        responseDoc.author_id = tweet.author_id;
-        responseDoc.isFollowing = followingIds.includes(tweet.author_id);
-      } else {
-        console.log(`Original tweet not found for response ID ${responseDoc._id}. Skipping.`);
-        responseDoc.isFollowing = false; // Treat as not following if tweet not found
-      }
-    }
-
-    // Optionally filter out responses to authors we aren't following
-    if (!REPLY_TO_UNFOLLOWED) {
-      unpostedResponses = unpostedResponses.filter(r => r.isFollowing);
-    }
-
-    // Prioritize responses to authors we are following
-    unpostedResponses.sort((a, b) => b.isFollowing - a.isFollowing);
-
-    for (const responseDoc of unpostedResponses) {
-      const responseText = responseDoc.response;
-      const tweetParams = {
-        text: responseText,
-      };
-
+    for (const response of responses) {
       try {
-        // Post the tweet using postX function
-        const tweetId = await postX(tweetParams, responseDoc.tweet_id);
+        const tweet = await tweetsCollection.findOne({ id: response.tweet_id });
+        const isFollowing = tweet ? followingIds.includes(tweet.author_id) : false;
 
-        if (tweetId) {
-          // Update the response in the database to mark it as posted
-          await responsesCollection.updateOne(
-            { _id: responseDoc._id },
-            { $set: { posted: true, response_id: tweetId } }
-          );
-          console.log(`Successfully posted response with ID ${responseDoc._id} as tweet ID ${tweetId}`);
-        } else  {
-          throw new Error("Failed to post.");
+        if (!REPLY_TO_UNFOLLOWED && !isFollowing) {
+          // Skip posting if the user is not followed
+          continue;
         }
-      } catch (error) {
-        console.error(`Error posting response with ID ${responseDoc._id}:`, error);
-        
-        // Update the response in the database to mark it as posted
+
+        const tweetId = await retryOperation(
+          () => postX({ text: response.response }, response.tweet_id),
+          3
+        );
+
         await responsesCollection.updateOne(
-          { _id: responseDoc._id },
-          { $set: { posted: true, response_id: null, error: error.message } }
+          { _id: response._id },
+          { $set: { posted: true, response_id: tweetId } }
+        );
+
+        console.log(`Posted response ID ${response._id} as tweet ID ${tweetId}`);
+      } catch (error) {
+        console.error(`Error posting response ID ${response._id}:`, error.message);
+        await responsesCollection.updateOne(
+          { _id: response._id },
+          { $set: { posted: false, error: error.message } }
         );
       }
 
-      // Wait for 10 minutes before posting the next response
-      const wait_time = ((Math.random() * 15) * 60 * 1000) + (15 * 60 * 1000); // 30 minutes
-      console.log(`Waiting for ${Math.floor(wait_time / 1000 )} seconds before posting the next response...`);
-      console.log(`Next response will be posted at ${(new Date(Date.now() + wait_time)).toLocaleTimeString()}`);
-      await delay(wait_time);
-      console.log('Done');
+      // Wait before next post to avoid spamming
+      console.log(`Waiting ${POST_INTERVAL_MINUTES / 1000} seconds before next post...`);
+      await delay(POST_INTERVAL_MINUTES);
     }
   } catch (error) {
-    console.error('Error posting generated responses:', error);
+    console.error('Error in postGeneratedResponses():', error);
+  }
+}
+
+// Graceful shutdown
+async function handleShutdown(signal) {
+  console.log(`Received ${signal}. Closing resources...`);
+  try {
+    if (client) {
+      await client.close();
+    }
+  } catch (err) {
+    console.error('Error during shutdown:', err);
+  }
+  process.exit(0);
+}
+
+// Main loop
+async function mainLoop() {
+  while (true) {
+    try {
+      await postGeneratedResponses();
+    } catch (error) {
+      // If we lose connection mid-loop, we attempt to reconnect
+      console.error('Error in posting responses:', error);
+      console.log('Attempting to reconnect to MongoDB...');
+      try {
+        db = await connectToMongoDBWithRetry();
+      } catch (err) {
+        console.error('Reconnection attempt failed:', err);
+      }
+    }
+
+    // Wait 5 minutes before next iteration
+    await delay(5 * 60 * 1000);
+  }
+}
+
+// Start the script
+async function main() {
+  try {
+    db = await connectToMongoDBWithRetry();
+    await mainLoop();
+  } catch (error) {
+    console.error('Fatal error, shutting down:', error);
     process.exit(1);
   }
 }
 
+// Handle termination signals
+process.on('SIGINT', () => handleShutdown('SIGINT'));
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
 
-// Function to pause execution respecting rate limits
-function delay(ms) {
-  console.log(`${new Date().toLocaleTimeString()}: Pausing for ${ms / 1000} seconds...`);
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function main() {
-
-  // Connect to MongoDB
-  db = await connectToMongoDB();
-  // Start posting generated responses
-  await postGeneratedResponses();
-
-}
-
-
-async function loop() {
-  while (true) {
-    await main();
-    await delay(1000 * 60 * 5); // 5 minutes
-  }
-}
-
-loop().catch(console.error);
+main().catch((error) => {
+  console.error('Uncaught fatal error:', error);
+  process.exit(1);
+});
