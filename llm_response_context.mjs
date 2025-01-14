@@ -243,8 +243,7 @@ class ResponseContextBuilder {
         descriptions.push(cached.description);
       } else {
         try {
-          const response = await describeImage(url);
-          const description = response.choices[0].message.content;
+          const description = await describeImage(url);
           await this.db.collection('image_visions').insertOne({ url, description, created_at: new Date() });
           descriptions.push(description);
         } catch (error) {
