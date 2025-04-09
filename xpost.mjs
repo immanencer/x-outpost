@@ -111,19 +111,41 @@ export async function postX(params, inReplyTo = '', imageBuffer = null) {
 /**
  * Utility function to chunk long text into smaller tweets
  */
-function chunkText(text) {
-    const maxTweetLength = 280;
+function chunkText(text, maxLen = 280) {
+    const paragraphs = text.split(/\n+/).filter((p) => p.trim().length > 0); // Preserve paragraphs
     const chunks = [];
-    let startIndex = 0;
-
-    while (startIndex < text.length) {
-        chunks.push(text.slice(startIndex, startIndex + maxTweetLength));
-        startIndex += maxTweetLength;
+    let currentChunk = "";
+  
+    for (const paragraph of paragraphs) {
+      if (currentChunk.length + paragraph.length + 2 <= maxLen) {
+        // Add paragraph to current chunk if it fits
+        currentChunk += (currentChunk.length ? "\n\n" : "") + paragraph;
+      } else {
+        // If paragraph doesn't fit, push the current chunk and start a new one
+        if (currentChunk) chunks.push(currentChunk);
+        if (paragraph.length > maxLen) {
+          // If a single paragraph is still too long, split by sentence
+          const sentences = paragraph.match(/[^.!?]+[.!?]+/g) || [paragraph];
+          let subChunk = "";
+          for (const sentence of sentences) {
+            if (subChunk.length + sentence.length + 1 <= maxLen) {
+              subChunk += (subChunk.length ? " " : "") + sentence;
+            } else {
+              chunks.push(subChunk);
+              subChunk = sentence;
+            }
+          }
+          if (subChunk) chunks.push(subChunk);
+        } else {
+          chunks.push(paragraph);
+        }
+        currentChunk = "";
+      }
     }
-
+    if (currentChunk) chunks.push(currentChunk);
     return chunks;
-}
-
+  }
+  
 /**
  * Utility function for delay
  */

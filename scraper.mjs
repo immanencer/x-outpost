@@ -83,6 +83,15 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function shouldIgnoreTweet(tweet) {
+  const text = tweet.text;
+  const hasNumbers = /\d/.test(text);
+  const hasPump = /pump/i.test(text);
+  const hasEthAddress = /0x[a-fA-F0-9]{40}/.test(text);
+  const hasSolAddress = /[1-9A-HJ-NP-Za-km-z]{32,44}/.test(text);
+  return (hasNumbers && hasPump) || hasEthAddress || hasSolAddress;
+}
+
 // Adaptive RateLimiter
 class AdaptiveRateLimiter {
   constructor(maxRequests, perMilliseconds, minInterval = 1000) {
@@ -395,7 +404,6 @@ class AuthorService {
 }
 // ────────────────────────────────────────────────────────────────────────────
 
-// Helper function to add tweets in bulk
 async function addTweetToMongoDB(db, tweets, includes) {
   const bulkOps = {
     tweets: [],
@@ -443,14 +451,18 @@ async function addTweetToMongoDB(db, tweets, includes) {
         }
       }
     }
-    // Add tweet
-    bulkOps.tweets.push({
-      updateOne: {
-        filter: { id: tweet.id },
-        update: { $set: tweet },
-        upsert: true
-      }
-    });
+    // Add tweet only if it should not be ignored
+    if (shouldIgnoreTweet(tweet)) {
+      console.log(`[Filter] Ignoring tweet ${tweet.id} due to content: ${tweet.text.substring(0, 50)}...`);
+    } else {
+      bulkOps.tweets.push({
+        updateOne: {
+          filter: { id: tweet.id },
+          update: { $set: tweet },
+          upsert: true
+        }
+      });
+    }
   }
 
   try {
@@ -470,7 +482,7 @@ async function addTweetToMongoDB(db, tweets, includes) {
 // Mentions search
 async function searchAuthenticatedUserMentions(authUser, sinceId) {
   const query = `@${authUser.username}`;
-  const params = {
+  let params = {
     query,
     max_results: 100,
     expansions: EXPANSIONS,
@@ -481,8 +493,20 @@ async function searchAuthenticatedUserMentions(authUser, sinceId) {
   if (sinceId) {
     params.since_id = sinceId;
   }
-  console.log(`[Twitter] Searching mentions for @${authUser.username} since tweet ID ${sinceId}`);
-  return await retryTwitterCall(() => twitterClient.v2.search(params), rateLimiters.searchTweets);
+  console.log(`[Twitter] Searching mentions for @${authUser.username} with params:`, params);
+
+  try {
+    return await retryTwitterCall(() => twitterClient.v2.search(params), rateLimiters.searchTweets);
+  } catch (error) {
+    // Check if it's a 400 error related to 'since_id'
+    if (error.code === 400 && error.data?.errors?.some(e => e.message.includes("'since_id'"))) {
+      console.warn(`[Twitter] Invalid 'since_id' ${sinceId}, retrying without 'since_id'...`);
+      delete params.since_id; // Remove the invalid since_id
+      return await retryTwitterCall(() => twitterClient.v2.search(params), rateLimiters.searchTweets);
+    }
+    // If it's another error, rethrow it
+    throw error;
+  }
 }
 
 // Main mentions fetch cycle
