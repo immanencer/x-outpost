@@ -1,5 +1,8 @@
 import process from 'process';
-const { OPENAI_API_URI, OPENAI_API_KEY } = process.env;
+import dotenv from 'dotenv';
+dotenv.config();
+
+const { OPENAI_API_URI, OPENAI_API_KEY, VISION_MODEL } = process.env;
 
 import OpenAI from "openai";
 
@@ -15,7 +18,7 @@ const openai = new OpenAI({
 export async function describeImage(fileUrl) {
     try {
         const response = await openai.chat.completions.create({
-            model: "meta-llama/llama-3.2-90b-vision-instruct",
+            model: VISION_MODEL,
             messages: [
                 {
                     role: "user",
