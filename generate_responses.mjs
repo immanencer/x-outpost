@@ -12,6 +12,7 @@ const __dirname = path.resolve();
 // -----------------------------------------------------------------------
 // Environment variables and constants
 // -----------------------------------------------------------------------
+const TWITTER_USERNAME = process.env.TWITTER_USERNAME || 'theerebusai';
 const TEXT_MODEL = process.env.TEXT_MODEL || 'gpt-3.5-turbo'; // Default to a known model
 const OPENAI_API_URI = process.env.OPENAI_API_URI || 'http://127.0.0.1:11434/v1';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'your-openai-api-key';
@@ -55,7 +56,7 @@ async function connectToMongoDB() {
    */
   const tlsOptions = MONGODB_TLS
     ? {
-        tls: true,
+        tls: MONGODB_TLS,
         tlsAllowInvalidCertificates: NODE_ENV !== 'production',
         tlsAllowInvalidHostnames: NODE_ENV !== 'production'
       }
@@ -252,7 +253,7 @@ async function main() {
     const postsCollection = db.collection('tweets');
 
     // Find the ID of Bob
-    const bobAuthor = await authorsCollection.findOne({ username: 'bobthesnek' });
+    const bobAuthor = await authorsCollection.findOne({ username: TWITTER_USERNAME });
     const bobId = bobAuthor ? bobAuthor.id : null;
 
     // Fetch prompts that are missing a response but have been processed for LLM context
