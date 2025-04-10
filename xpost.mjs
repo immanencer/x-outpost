@@ -3,6 +3,8 @@ import { Buffer } from 'buffer';
 
 import sharp from 'sharp';
 import { TwitterApi } from 'twitter-api-v2';
+import dotenv from 'dotenv'; // Import dotenv
+dotenv.config(); // Load environment variables from .env
 
 const xClient = new TwitterApi({
     appKey: process.env.TWITTER_APP_TOKEN,
