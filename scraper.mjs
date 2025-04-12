@@ -646,13 +646,58 @@ async function startBackgroundProcesses(db) {
 }
 
 // Get authenticated user
-async function getAuthenticatedUser() {
+async function getAuthenticatedUser(db) {
   try {
+    // Get the user ID from environment variable
+    const authUserId = process.env.TWITTER_USER_ID;
+    
+    if (!authUserId) {
+      console.warn('[Config] TWITTER_USER_ID not found in environment variables');
+    }
+    
+    // First check if we have the authenticated user in our database
+    if (db && authUserId) {
+      console.log(`[MongoDB] Looking up authenticated user by ID: ${authUserId}`);
+      const authorsCollection = db.collection('authors');
+      const storedUser = await authorsCollection.findOne({ id: authUserId });
+      
+      if (storedUser) {
+        const isStale = !storedUser.lastFetched || 
+          Date.now() - new Date(storedUser.lastFetched).getTime() > 24 * 3600 * 1000; // 1 day
+        
+        if (!isStale) {
+          console.log(`[MongoDB] Using cached authenticated user: @${storedUser.username}`);
+          return storedUser;
+        }
+        console.log('[MongoDB] Cached authenticated user is stale, refreshing from Twitter...');
+      } else {
+        console.log(`[MongoDB] No user found with ID: ${authUserId}`);
+      }
+    }
+
+    // Fallback to Twitter API if not in DB or stale
+    console.log('[Twitter] Fetching authenticated user info...');
     const user = await retryTwitterCall(
-      () => twitterClient.v2.me({ 'user.fields': USER_FIELDS }),
+      (client) => client.v2.me({ 'user.fields': USER_FIELDS }),
       rateLimiters.userByUsername
     );
+
     console.log(`[Twitter] Authenticated as: @${user.data.username} (ID: ${user.data.id})`);
+    
+    // Store in database with updated timestamp
+    if (db) {
+      await db.collection('authors').updateOne(
+        { id: user.data.id },
+        { 
+          $set: { 
+            ...user.data,
+            lastFetched: new Date()
+          } 
+        },
+        { upsert: true }
+      );
+    }
+    
     return user.data;
   } catch (error) {
     console.error('[Twitter] Error fetching authenticated user info:', error);
@@ -682,7 +727,7 @@ async function main() {
     db = await connectToMongoDB();
 
     // Auth user
-    const authUser = await getAuthenticatedUser();
+    const authUser = await getAuthenticatedUser(db);
     // Store our own bot user in authors as well
     await addOrUpdateAuthor(db, authUser);
 
