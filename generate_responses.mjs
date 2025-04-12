@@ -261,7 +261,7 @@ async function main() {
       .find({
         author_id: { $ne: bobId },
         response: { $exists: false },
-        processed_by: 'llm_context',
+        processed_by: 'llm_context_builder_v2',
         processed_at: { $exists: true }
       })
       .toArray();
