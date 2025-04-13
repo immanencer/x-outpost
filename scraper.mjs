@@ -4,9 +4,14 @@ import dotenv from 'dotenv';
 import { MongoClient } from 'mongodb';
 import { TwitterApi } from 'twitter-api-v2';
 import { v4 as uuidv4 } from 'uuid';
+import fetch from 'node-fetch';
 
 // Load environment variables from .env
 dotenv.config();
+
+// New API configuration
+const XCACHE_API_BASE_URL = process.env.XCACHE_API_BASE_URL
+const XCACHE_API_KEY = process.env.XCACHE_API_KEY;
 
 // Constants
 const TWEET_FIELDS = [
@@ -149,7 +154,8 @@ const rateLimiters = {
   homeTimeline: new AdaptiveRateLimiter(180, 15 * 60 * 1000),
   userTweets: new AdaptiveRateLimiter(900, 15 * 60 * 1000),
   searchTweets: new AdaptiveRateLimiter(450, 15 * 60 * 1000),
-  userByUsername: new AdaptiveRateLimiter(300, 15 * 60 * 1000)
+  userByUsername: new AdaptiveRateLimiter(300, 15 * 60 * 1000),
+  xCacheAPI: new AdaptiveRateLimiter(180, 15 * 60 * 1000)
 };
 
 // MongoDB connection
@@ -299,6 +305,54 @@ async function retryTwitterCall(apiCall, limiter, retryCount = 0) {
       return retryTwitterCall(apiCall, limiter, retryCount + 1);
     }
     console.error('[Twitter] API error:', error);
+    throw error;
+  }
+}
+
+// Fetch mentions from X-Cache API
+async function fetchMentionsFromXCache(sinceId = null) {
+  const username = process.env.TWITTER_USERNAME || 'theerebusai';
+  let url = `${XCACHE_API_BASE_URL}/api/v1/users/${username}/mentions`;
+  
+  if (sinceId) {
+    url += `?since_id=${sinceId}`;
+  }
+  
+  try {
+    await rateLimiters.xCacheAPI.removeTokens();
+    console.log(`[XCACHE] Fetching mentions for @${username} from: ${url}`);
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'X-API-KEY': XCACHE_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      timeout: TWITTER_API_TIMEOUT
+    });
+    
+    if (!response.ok) {
+      throw new Error(`API returned ${response.status}: ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    rateLimiters.xCacheAPI.recordSuccess();
+    
+    // Transform the data structure to match what existing code expects
+    if (data && data.data && Array.isArray(data.data)) {
+      data.data = data.data.map(tweet => {
+        // Extract author.id into author_id field for compatibility
+        if (tweet.author && tweet.author.id) {
+          tweet.author_id = tweet.author.id;
+        }
+        return tweet;
+      });
+    }
+    
+    return data;
+  } catch (error) {
+    rateLimiters.xCacheAPI.recordFailure();
+    console.error('[XCACHE] Error fetching mentions:', error);
     throw error;
   }
 }
@@ -479,32 +533,13 @@ async function addTweetToMongoDB(db, tweets, includes) {
   }
 }
 
-// Mentions search
+// Mentions search using XCACHE API
 async function searchAuthenticatedUserMentions(authUser, sinceId) {
-  const query = `@${authUser.username}`;
-  let params = {
-    query,
-    max_results: 100,
-    expansions: EXPANSIONS,
-    'media.fields': MEDIA_FIELDS,
-    'tweet.fields': TWEET_FIELDS,
-    'user.fields': USER_FIELDS
-  };
-  if (sinceId) {
-    params.since_id = sinceId;
-  }
-  console.log(`[Twitter] Searching mentions for @${authUser.username} with params:`, params);
-
   try {
-    return await retryTwitterCall(() => twitterClient.v2.search(params), rateLimiters.searchTweets);
+    console.log(`[XCACHE] Searching mentions for @${authUser.username}`);
+    return await fetchMentionsFromXCache(sinceId);
   } catch (error) {
-    // Check if it's a 400 error related to 'since_id'
-    if (error.code === 400 && error.data?.errors?.some(e => e.message.includes("'since_id'"))) {
-      console.warn(`[Twitter] Invalid 'since_id' ${sinceId}, retrying without 'since_id'...`);
-      delete params.since_id; // Remove the invalid since_id
-      return await retryTwitterCall(() => twitterClient.v2.search(params), rateLimiters.searchTweets);
-    }
-    // If it's another error, rethrow it
+    console.error(`[XCACHE] Error searching mentions:`, error);
     throw error;
   }
 }
@@ -523,8 +558,8 @@ async function startMentionsFetchCycle(db, authUser, authorService) {
       const sinceId = mostRecentMention.length > 0 ? mostRecentMention[0].id : null;
 
       const mentions = await searchAuthenticatedUserMentions(authUser, sinceId);
-      if (mentions.data?.data) {
-        const newTweets = mentions.data.data;
+      if (mentions.data) {
+        const newTweets = mentions.data;
         await addTweetToMongoDB(db, newTweets, mentions.includes);
 
         // ── Enrich authors here ──
@@ -716,7 +751,9 @@ async function main() {
       'TWITTER_ACCESS_TOKEN',
       'TWITTER_ACCESS_SECRET',
       'MONGODB_URI',
-      'DB_NAME'
+      'DB_NAME',
+      'XCACHE_API_BASE_URL',
+      'XCACHE_API_KEY'
     ];
     const missingVars = requiredEnvVars.filter((envVar) => !process.env[envVar]);
     if (missingVars.length) {
@@ -735,8 +772,12 @@ async function main() {
     const authorService = new AuthorService(db);
 
     // Start main cycles
-    startMainFetchCycle(db, authUser, authorService);
-    startMentionsFetchCycle(db, authUser, authorService);
+    if (process.env.FETCH_X_TIMELINE.toLowerCase !== 'false') {
+      startMainFetchCycle(db, authUser, authorService);
+    }
+    if (process.env.FETCH_X_MENTIONS.toLowerCase !== 'false') {
+      startMentionsFetchCycle(db, authUser, authorService);
+    }
 
     // Delayed background stuff
     setTimeout(() => {
