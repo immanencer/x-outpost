@@ -496,7 +496,7 @@ class AuthorService {
         const existing = await this.db.collection('authors').findOne({ id: authorId });
         const isStale =
           !existing?.lastFetched ||
-          Date.now() - new Date(existing.lastFetched).getTime() > 24 * 3600 * 1000 * 7; // 1 week
+          Date.now() - new Date(existing.lastFetched).getTime() > 24 * 3600 * 1000; // 1 day
         if (!existing || isStale) {
           // fetch from Twitter
           const userData = await fetchUserById(authorId);
