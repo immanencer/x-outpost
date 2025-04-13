@@ -925,9 +925,9 @@ async function main() {
     const authorService = new AuthorService(db);
 
     // Start main cycles
-    // if (process.env.FETCH_X_TIMELINE.toLowerCase !== 'false') {
-    //   startMainFetchCycle(db, authUser, authorService);
-    // }
+    if (process.env.FETCH_X_TIMELINE.toLowerCase !== 'false') {
+      startMainFetchCycle(db, authUser, authorService);
+    }
     if (process.env.FETCH_X_MENTIONS.toLowerCase !== 'false') {
       startMentionsFetchCycle(db, authUser, authorService);
     }
