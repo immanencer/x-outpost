@@ -309,6 +309,60 @@ async function retryTwitterCall(apiCall, limiter, retryCount = 0) {
   }
 }
 
+// Fetch a single tweet using the conversations endpoint and extract only the specific tweet
+async function fetchSingleTweetFromXCache(tweetId) {
+  const url = `${XCACHE_API_BASE_URL}/api/v1/conversations/${tweetId}`;
+  
+  try {
+    await rateLimiters.xCacheAPI.removeTokens();
+    console.log(`[XCACHE] Fetching tweet ${tweetId} via conversations endpoint`);
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'X-API-KEY': XCACHE_API_KEY,
+        'Content-Type': 'application/json'
+      },
+      timeout: TWITTER_API_TIMEOUT
+    });
+    
+    if (!response.ok) {
+      throw new Error(`API returned ${response.status}: ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    rateLimiters.xCacheAPI.recordSuccess();
+    
+    // Extract only the specific tweet we requested from the response
+    if (data && data.data && Array.isArray(data.data)) {
+      // Find the specific tweet with our requested ID
+      const targetTweet = data.data.find(tweet => tweet.id === tweetId);
+      
+      if (targetTweet) {
+        // Ensure author_id is set properly
+        if (targetTweet.author && targetTweet.author.id) {
+          targetTweet.author_id = targetTweet.author.id;
+        }
+        
+        // Return only this tweet in the expected format
+        return {
+          data: [targetTweet],
+          includes: data.includes // Keep the includes as they may contain relevant author info
+        };
+      }
+    }
+    
+    // If we couldn't find the specific tweet
+    console.warn(`[XCACHE] Couldn't extract tweet ${tweetId} from conversation response`);
+    return null;
+  } catch (error) {
+    rateLimiters.xCacheAPI.recordFailure();
+    console.error(`[XCACHE] Error fetching tweet ${tweetId}:`, error);
+    throw error;
+  }
+}
+
+
 // Fetch mentions from X-Cache API
 async function fetchMentionsFromXCache(sinceId = null) {
   const username = process.env.TWITTER_USERNAME || 'theerebusai';
@@ -564,7 +618,7 @@ async function startMentionsFetchCycle(db, authUser, authorService) {
 
         // ── Enrich authors here ──
         await authorService.collectAuthorsFromTweets(newTweets);
-
+        
         console.log(`[Mentions] Processed ${newTweets.length} new mentions`);
       } else {
         console.log('[Mentions] No new mentions found');
@@ -590,6 +644,105 @@ async function getHomeTimeline(lastId) {
   };
   console.log('[Twitter] Requesting home timeline:', params);
   return await retryTwitterCall(() => twitterClient.v2.homeTimeline(params), rateLimiters.homeTimeline);
+}
+
+// Optimized function to process only tweets with missing parents
+async function processConversationThreads(db, authorService) {
+  const tweetsCollection = db.collection('tweets');
+  
+  console.log('[ConversationProcessor] Starting optimized conversation thread processing...');
+  
+  try {
+    // The magic happens here - we use MongoDB aggregation to find only tweets
+    // that reference parent tweets that aren't in our database yet
+    const pipeline = [
+      // Stage 1: Unwind the referenced_tweets array to work with each reference individually
+      { $unwind: '$referenced_tweets' },
+      
+      // Stage 2: Filter to only include "replied_to" references
+      { $match: { 'referenced_tweets.type': 'replied_to' } },
+      
+      // Stage 3: Group by the referenced tweet ID to avoid duplicates
+      { $group: { 
+          _id: '$referenced_tweets.id',
+          tweetId: { $first: '$id' },
+          conversationId: { $first: '$conversation_id' },
+          referencedId: { $first: '$referenced_tweets.id' }
+      }},
+      
+      // Stage 4: Perform a lookup to see if the referenced tweet exists in our collection
+      { $lookup: {
+          from: 'tweets',
+          localField: 'referencedId',
+          foreignField: 'id',
+          as: 'parentTweet'
+      }},
+      
+      // Stage 5: Filter to only include references where the parent tweet doesn't exist
+      { $match: { 'parentTweet': { $size: 0 } } },
+      
+      // Stage 6: Limit the number we process at once
+      { $limit: 50 }
+    ];
+    
+    const missingParents = await tweetsCollection.aggregate(pipeline).toArray();
+    
+    console.log(`[ConversationProcessor] Found ${missingParents.length} tweets with missing parents`);
+    
+    if (missingParents.length === 0) {
+      return;
+    }
+    
+    // Extract the IDs of the missing parent tweets
+    const missingParentIds = missingParents.map(item => item.referencedId);
+    
+    console.log(`[ConversationProcessor] Will fetch these missing parent tweets: ${missingParentIds.join(', ')}`);
+    
+    // Fetch and store each missing parent tweet
+    for (const parentId of missingParentIds) {
+      try {
+        const tweetData = await fetchSingleTweetFromXCache(parentId);
+        
+        if (tweetData && tweetData.data && tweetData.data.length > 0) {
+          // Store the tweet in MongoDB
+          await addTweetToMongoDB(db, tweetData.data, tweetData.includes);
+          
+          // Enrich author information
+          await authorService.collectAuthorsFromTweets(tweetData.data);
+          
+          console.log(`[ConversationProcessor] Added parent tweet ${parentId} to database`);
+          
+          // Check if this newly added tweet is also a reply
+          // If so, it will be picked up in the next processing cycle
+        }
+      } catch (error) {
+        console.error(`[ConversationProcessor] Error fetching parent tweet ${parentId}:`, error);
+      }
+      
+      // Apply a small delay between API calls to avoid rate limiting
+      await delay(1000);
+    }
+    
+    console.log(`[ConversationProcessor] Completed conversation thread processing`);
+  } catch (error) {
+    console.error('[ConversationProcessor] Error during conversation processing:', error);
+  }
+}
+
+
+// Start the conversation processor on a different schedule
+async function startConversationProcessingCycle(db, authorService) {
+  const CONVERSATION_PROCESSING_INTERVAL = 1000 * 60 * 15; // 15 minutes
+  
+  while (true) {
+    try {
+      await processConversationThreads(db, authorService);
+      await delay(CONVERSATION_PROCESSING_INTERVAL);
+    } catch (error) {
+      console.error('[ConversationProcessor] Error in processing cycle:', error);
+      await delay(INITIAL_RETRY_DELAY);
+    }
+  }
 }
 
 // Main timeline fetch cycle
@@ -778,6 +931,10 @@ async function main() {
     if (process.env.FETCH_X_MENTIONS.toLowerCase !== 'false') {
       startMentionsFetchCycle(db, authUser, authorService);
     }
+
+    // Start conversation processing cycle
+    startConversationProcessingCycle(db, authorService);
+    
 
     // Delayed background stuff
     setTimeout(() => {
