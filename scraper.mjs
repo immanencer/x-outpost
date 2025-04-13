@@ -678,7 +678,7 @@ async function getAuthenticatedUser(db) {
     // Fallback to Twitter API if not in DB or stale
     console.log('[Twitter] Fetching authenticated user info...');
     const user = await retryTwitterCall(
-      (client) => client.v2.me({ 'user.fields': USER_FIELDS }),
+      () => twitterClient.v2.me({ 'user.fields': USER_FIELDS }),
       rateLimiters.userByUsername
     );
 
