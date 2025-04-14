@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Tweets Dashboard</title>
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+    <!-- Custom Stylesheet -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <nav class="main-nav">
+            <a href="/">Authors</a>
+            <a href="/tweets" class="active">Tweets</a>
+        </nav>
+        
+        <h1>Tweets Dashboard</h1>
+        
+        <div class="filter-controls">
+            <div class="filter-group">
+                <label for="status-filter">Filter by status:</label>
+                <select id="status-filter">
+                    <option value="all">All Tweets</option>
+                    <option value="processed">Processed</option>
+                    <option value="unprocessed">Unprocessed</option>
+                    <option value="with-response">With Response</option>
+                    <option value="without-response">Without Response</option>
+                    <option value="posted">Posted</option>
+                    <option value="not-posted">Not Posted</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label for="search-input">Search:</label>
+                <input type="text" id="search-input" placeholder="Search tweets...">
+            </div>
+        </div>
+        
+        <div id="tweets-container" class="tweets-container">
+            <!-- Tweets will be loaded here -->
+            <div class="loading">Loading tweets...</div>
+        </div>
+        
+        <div class="pagination">
+            <button id="prev-page" disabled>&laquo; Previous</button>
+            <span id="page-info">Page 1</span>
+            <button id="next-page">Next &raquo;</button>
+        </div>
+    </div>
+
+    <!-- Error Message Container -->
+    <div id="error-message" class="error-message hidden">
+        <!-- Error messages will be displayed here -->
+    </div>
+
+    <!-- Confirmation Dialog -->
+    <div id="confirmation-dialog" class="confirmation-dialog hidden">
+        <div class="confirmation-dialog-content">
+            <h3>Confirm Deletion</h3>
+            <p>Are you sure you want to delete this response? This action cannot be undone.</p>
+            <div class="confirmation-buttons">
+                <button id="confirm-delete" class="confirm-btn">Delete</button>
+                <button id="cancel-delete" class="cancel-btn">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let currentPage = 1;
+        const tweetsPerPage = 10;
+        let totalTweets = 0;
+        let currentFilter = 'all';
+        let currentSearch = '';
+        let currentResponseToDelete = null;
+        
+        // DOM elements
+        const tweetsContainer = document.getElementById('tweets-container');
+        const prevPageBtn = document.getElementById('prev-page');
+        const nextPageBtn = document.getElementById('next-page');
+        const pageInfo = document.getElementById('page-info');
+        const statusFilter = document.getElementById('status-filter');
+        const searchInput = document.getElementById('search-input');
+        const confirmationDialog = document.getElementById('confirmation-dialog');
+        const confirmDeleteBtn = document.getElementById('confirm-delete');
+        const cancelDeleteBtn = document.getElementById('cancel-delete');
+        
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', loadTweets);
+        prevPageBtn.addEventListener('click', () => {
+            if (currentPage > 1) {
+                currentPage--;
+                loadTweets();
+            }
+        });
+        nextPageBtn.addEventListener('click', () => {
+            currentPage++;
+            loadTweets();
+        });
+        statusFilter.addEventListener('change', () => {
+            currentFilter = statusFilter.value;
+            currentPage = 1;
+            loadTweets();
+        });
+        searchInput.addEventListener('input', debounce(() => {
+            currentSearch = searchInput.value;
+            currentPage = 1;
+            loadTweets();
+        }, 500));
+        
+        // Confirmation dialog event listeners
+        confirmDeleteBtn.addEventListener('click', async () => {
+            if (currentResponseToDelete) {
+                await deleteResponse(currentResponseToDelete);
+                confirmationDialog.classList.add('hidden');
+                currentResponseToDelete = null;
+            }
+        });
+        
+        cancelDeleteBtn.addEventListener('click', () => {
+            confirmationDialog.classList.add('hidden');
+            currentResponseToDelete = null;
+        });
+        
+        // Debounce function for search input
+        function debounce(func, wait) {
+            let timeout;
+            return function() {
+                const context = this, args = arguments;
+                clearTimeout(timeout);
+                timeout = setTimeout(() => func.apply(context, args), wait);
+            };
+        }
+        
+        // Main function to load tweets
+        async function loadTweets() {
+            try {
+                tweetsContainer.innerHTML = '<div class="loading">Loading tweets...</div>';
+                
+                // Build query parameters
+                const params = new URLSearchParams({
+                    page: currentPage,
+                    limit: tweetsPerPage,
+                    filter: currentFilter,
+                    search: currentSearch
+                });
+                
+                const response = await fetch(`/api/tweets?${params}`);
+                if (!response.ok) {
+                    displayError('Failed to load tweets. Please try again later.');
+                    return;
+                }
+                
+                const data = await response.json();
+                displayTweets(data.tweets);
+                updatePagination(data.total);
+                
+            } catch (error) {
+                console.error('Error loading tweets:', error);
+                displayError('An unexpected error occurred while loading tweets.');
+            }
+        }
+        
+        // Function to display tweets
+        function displayTweets(tweets) {
+            if (!tweets || tweets.length === 0) {
+                tweetsContainer.innerHTML = '<div class="no-tweets">No tweets found matching your criteria.</div>';
+                return;
+            }
+            
+            tweetsContainer.innerHTML = '';
+            
+            tweets.forEach(tweet => {
+                const tweetCard = document.createElement('div');
+                tweetCard.className = 'tweet-card';
+                
+                // Determine processing status class
+                let statusClass = 'status-unknown';
+                let statusText = 'Unknown';
+                
+                if (tweet.processing_status && tweet.processing_status.llm_context) {
+                    statusClass = 'status-processed';
+                    statusText = 'Processed';
+                } else {
+                    statusClass = 'status-unprocessed';
+                    statusText = 'Unprocessed';
+                }
+                
+                // Handle media content
+                let mediaContent = '';
+                if (tweet.mediaData && tweet.mediaData.length > 0) {
+                    mediaContent = '<div class="tweet-media">';
+                    tweet.mediaData.forEach(media => {
+                        if (media.type === 'photo') {
+                            mediaContent += `<img src="${media.url}" alt="Tweet media">`;
+                        } else if (media.type === 'video') {
+                            mediaContent += `<video controls><source src="${media.url}" type="video/mp4">Your browser does not support the video tag.</video>`;
+                        }
+                    });
+                    mediaContent += '</div>';
+                }
+                
+                // Response section with posted status and delete button
+                let responseContent = '<div class="tweet-response">';
+                if (tweet.response) {
+                    // Determine posted status
+                    let postedStatus = '';
+                    let deleteButton = '';
+                    
+                    if (tweet.response.posted === true) {
+                        postedStatus = '<span class="posted-status posted">Posted ✓</span>';
+                    } else if (tweet.response.posted === false) {
+                        postedStatus = '<span class="posted-status not-posted">Not Posted ✗</span>';
+                        // Add delete button only for responses that haven't been posted
+                        deleteButton = `<button class="delete-response-btn" data-tweet-id="${tweet.id}">Delete Response</button>`;
+                    } else {
+                        postedStatus = '<span class="posted-status unknown">Post Status Unknown</span>';
+                        // Also add delete button when status is unknown
+                        deleteButton = `<button class="delete-response-btn" data-tweet-id="${tweet.id}">Delete Response</button>`;
+                    }
+                    
+                    // Add Tweet ID if posted
+                    let responseIdSection = '';
+                    if (tweet.response.response_id) {
+                        responseIdSection = `<div class="response-id">Response ID: ${tweet.response.response_id}</div>`;
+                    }
+                    
+                    responseContent += `
+                        <div class="response-header">
+                            <h4>Response:</h4>
+                            ${postedStatus}
+                        </div>
+                        <p>${tweet.response.response || 'No response content available.'}</p>
+                        ${responseIdSection}
+                        <div class="response-meta">
+                            Generated: ${new Date(tweet.response.response_generated_at || tweet.response.processed_at).toLocaleString()}
+                            ${deleteButton}
+                        </div>
+                    `;
+                } else {
+                    responseContent += '<p class="no-response">No response generated yet.</p>';
+                }
+                responseContent += '</div>';
+                
+                // Build tweet card HTML
+                tweetCard.innerHTML = `
+                    <div class="tweet-header">
+                        <span class="tweet-author">@${tweet.author_username || 'Unknown'}</span>
+                        <span class="tweet-date">${new Date(tweet.created_at).toLocaleString()}</span>
+                        <span class="tweet-status ${statusClass}">${statusText}</span>
+                    </div>
+                    <div class="tweet-body">
+                        <p>${tweet.text}</p>
+                        ${mediaContent}
+                    </div>
+                    ${responseContent}
+                `;
+                
+                tweetsContainer.appendChild(tweetCard);
+            });
+            
+            // Add event listeners to delete buttons
+            document.querySelectorAll('.delete-response-btn').forEach(button => {
+                button.addEventListener('click', (event) => {
+                    const tweetId = event.target.getAttribute('data-tweet-id');
+                    showDeleteConfirmation(tweetId);
+                });
+            });
+        }
+        
+        // Function to show delete confirmation dialog
+        function showDeleteConfirmation(tweetId) {
+            currentResponseToDelete = tweetId;
+            confirmationDialog.classList.remove('hidden');
+        }
+        
+        // Function to delete response
+        async function deleteResponse(tweetId) {
+            try {
+                const response = await fetch(`/api/tweets/${tweetId}/response`, {
+                    method: 'DELETE',
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
+                }
+                
+                // Reload tweets to show updated data
+                displaySuccess('Response successfully deleted.');
+                loadTweets();
+                
+            } catch (error) {
+                console.error('Error deleting response:', error);
+                displayError(`Failed to delete response: ${error.message}`);
+            }
+        }
+        
+        // Function to display success message
+        function displaySuccess(message) {
+            const errorMessage = document.getElementById('error-message');
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+            errorMessage.style.backgroundColor = '#4CAF50'; // Green for success
+            
+            // Automatically hide after 5 seconds
+            setTimeout(() => {
+                errorMessage.classList.add('hidden');
+                errorMessage.style.backgroundColor = '#f44336'; // Reset to default red
+            }, 5000);
+        }
+        
+        // Function to update pagination
+        function updatePagination(total) {
+            totalTweets = total;
+            const totalPages = Math.ceil(total / tweetsPerPage);
+            
+            pageInfo.textContent = `Page ${currentPage} of ${totalPages || 1}`;
+            prevPageBtn.disabled = currentPage <= 1;
+            nextPageBtn.disabled = currentPage >= totalPages;
+        }
+        
+        // Function to display error messages
+        function displayError(message) {
+            const errorMessage = document.getElementById('error-message');
+            errorMessage.textContent = message;
+            errorMessage.classList.remove('hidden');
+            
+            // Automatically hide after 5 seconds
+            setTimeout(() => {
+                errorMessage.classList.add('hidden');
+            }, 5000);
+        }
+    </script>
+</body>
+</html>
