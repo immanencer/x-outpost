@@ -219,10 +219,12 @@
                         deleteButton = `<button class="delete-response-btn" data-tweet-id="${tweet.id}">Delete Response</button>`;
                     }
                     
-                    // Add Tweet ID if posted
+                    // Add response ID
                     let responseIdSection = '';
                     if (tweet.response.response_id) {
                         responseIdSection = `<div class="response-id">Response ID: ${tweet.response.response_id}</div>`;
+                    } else if (tweet.response._id) {
+                        responseIdSection = `<div class="response-id">Response Document ID: ${tweet.response._id}</div>`;
                     }
                     
                     responseContent += `
@@ -248,6 +250,10 @@
                         <span class="tweet-author">@${tweet.author_username || 'Unknown'}</span>
                         <span class="tweet-date">${new Date(tweet.created_at).toLocaleString()}</span>
                         <span class="tweet-status ${statusClass}">${statusText}</span>
+                    </div>
+                    <div class="tweet-meta">
+                        <span class="tweet-id">Tweet ID: ${tweet.id}</span>
+                        ${tweet.conversation_id ? `<span class="conversation-id">Conversation ID: ${tweet.conversation_id}</span>` : ''}
                     </div>
                     <div class="tweet-body">
                         <p>${tweet.text}</p>
