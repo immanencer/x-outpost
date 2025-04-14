@@ -39,11 +39,10 @@ async function generateLLMContext(db, authorId) {
 async function generateEvolvingNotes(context, priorSummary) {
   let openai;
   if (process.env.USE_OPENAI_API === 'true') {
-    const { Configuration, OpenAIApi } = await import('openai');
-    const configuration = new Configuration({
+    openai = new OpenAI({
+      baseURL: process.env.OPENAI_API_URI,
       apiKey: process.env.OPENAI_API_KEY,
-    });
-    openai = new OpenAIApi(configuration);
+    })
   } else {
     openai = new OpenAI({
       baseURL: 'http://127.0.0.1:11434/v1',
@@ -55,13 +54,13 @@ async function generateEvolvingNotes(context, priorSummary) {
 
   let response;
   if (process.env.USE_OPENAI_API === 'true') {
-    response = await openai.createCompletion({
-      model: 'text-davinci-003',
-      prompt,
+    response = await openai.chat.completions.create({
+      model: process.env.TEXT_MODEL,
+      messages: [{ role: 'user', content: prompt }],
       max_tokens: 2048,
-      temperature: 0.7,
+      temperature: 1.0,
     });
-    return response.data.choices[0].text.trim();
+    return response.choices[0].message.content.trim();
   } else {
     response = await openai.chat.completions.create({
       model: 'llama3.2',
@@ -86,7 +85,7 @@ async function generateEvolvingNotes(context, priorSummary) {
       const currentTweetCount = await db.collection('tweets').countDocuments({ author_id: authorId });
 
       // If significant new tweets have been added, update evolving notes
-      if (currentTweetCount - lastFetchedCount >= 10) {
+      if (currentTweetCount - lastFetchedCount >= 1) {
         // Generate LLM context based on MongoDB data
         const context = await generateLLMContext(db, authorId);
 
