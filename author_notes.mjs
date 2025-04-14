@@ -40,8 +40,8 @@ async function generateEvolvingNotes(context, priorSummary) {
   let openai;
   if (process.env.USE_OPENAI_API === 'true') {
     openai = new OpenAI({
-      baseURL: process.env.OPENAI_API_URI,
-      apiKey: process.env.OPENAI_API_KEY,
+      baseURL: process.env.OPENROUTER_API_URL,
+      apiKey: process.env.OPENROUTER_API_KEY,
     })
   } else {
     openai = new OpenAI({

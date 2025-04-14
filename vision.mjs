@@ -2,16 +2,16 @@ import process from 'process';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const { OPENAI_API_URI, OPENAI_API_KEY, VISION_MODEL } = process.env;
+const { OPENROUTER_API_URL, OPENROUTER_API_KEY, VISION_MODEL } = process.env;
 
 import OpenAI from "openai";
 
 const openai = new OpenAI({
-    baseURL: OPENAI_API_URI,
-    apiKey: OPENAI_API_KEY,
+    baseURL: OPENROUTER_API_URL,
+    apiKey: OPENROUTER_API_KEY,
     defaultHeaders: {
-        "HTTP-Referer": "https://ratimics.com", // Replace with your site URL (optional)
-        "X-Title": "Bob the Snake" // Replace with your app name (optional)
+        "HTTP-Referer": "https://theerebusai.com", // Replace with your site URL (optional)
+        "X-Title": "Erebus" // Replace with your app name (optional)
     }
 });
 
