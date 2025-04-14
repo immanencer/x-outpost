@@ -14,8 +14,8 @@ const __dirname = path.resolve();
 // -----------------------------------------------------------------------
 const TWITTER_USERNAME = process.env.TWITTER_USERNAME || 'theerebusai';
 const TEXT_MODEL = process.env.TEXT_MODEL || 'gpt-3.5-turbo'; // Default to a known model
-const OPENAI_API_URI = process.env.OPENAI_API_URI || 'http://127.0.0.1:11434/v1';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || 'your-openai-api-key';
+const OPENROUTER_API_URL = process.env.OPENROUTER_API_URL || 'http://127.0.0.1:11434/v1';
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || 'your-openai-api-key';
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017';
 const DB_NAME = process.env.DB_NAME || 'test_db';
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -40,8 +40,8 @@ function isTweetValid(text) {
 // OpenAI client instance
 // -----------------------------------------------------------------------
 const openai = new OpenAI({
-  baseURL: OPENAI_API_URI,
-  apiKey: OPENAI_API_KEY
+  baseURL: OPENROUTER_API_URL,
+  apiKey: OPENROUTER_API_KEY
 });
 
 // -----------------------------------------------------------------------
