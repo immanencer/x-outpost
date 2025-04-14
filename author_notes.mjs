@@ -85,7 +85,7 @@ async function generateEvolvingNotes(context, priorSummary) {
       const currentTweetCount = await db.collection('tweets').countDocuments({ author_id: authorId });
 
       // If significant new tweets have been added, update evolving notes
-      if (currentTweetCount - lastFetchedCount >= 1) {
+      if (currentTweetCount - lastFetchedCount >= 10) {
         // Generate LLM context based on MongoDB data
         const context = await generateLLMContext(db, authorId);
 
